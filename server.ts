@@ -321,10 +321,6 @@ app.get('/api/system/status', async (_req, res) => {
     tempRetentionHours: Number(process.env.TEMP_RETENTION_HOURS || '24'),
     supportedVideoFormats: ['MP4', 'MOV', 'MKV'],
     supportedLogoFormats: ['PNG', 'SVG'],
-    runtime: 'express',
-    d1Available: false,
-    r2Available: false,
-    clientProcessingAvailable: true,
   });
 });
 

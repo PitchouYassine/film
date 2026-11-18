@@ -5,25 +5,6 @@
 
 import { Project, CloudAssetManifestEntry } from '../types/studio';
 import { resolveApiUrl } from './api';
-import { indexedDbStore, normalizeMediaUrlCacheKey } from './indexedDbStore';
-
-const memoizedObjectUrls = new Map<
-  string,
-  { cachedAt: string; sizeBytes: number; objectUrl: string }
->();
-
-export function revokeCachedObjectUrl(url: string): void {
-  const key = normalizeMediaUrlCacheKey(url);
-  const existing = memoizedObjectUrls.get(key);
-  if (existing) {
-    try {
-      URL.revokeObjectURL(existing.objectUrl);
-    } catch {
-      // ignore
-    }
-    memoizedObjectUrls.delete(key);
-  }
-}
 
 export function isSupabaseConfigured(): boolean {
   return false;
@@ -32,12 +13,7 @@ export function isSupabaseConfigured(): boolean {
 export function getSupabaseClient() {
   return {
     auth: {
-      onAuthStateChange: (
-        _callback: (
-          evt: string,
-          session: { user?: { id: string; email?: string } | null } | null
-        ) => void
-      ) => {
+      onAuthStateChange: (_callback: (evt: string, session: any) => void) => {
         return { data: { subscription: { unsubscribe: () => {} } } };
       },
     },
@@ -53,46 +29,6 @@ export async function resolvePlayableAssetUrl(
   _cloudAssets?: Record<string, CloudAssetManifestEntry>
 ): Promise<string | null> {
   if (!url) return null;
-  if (
-    url.startsWith('blob:') ||
-    url.startsWith('data:') ||
-    url.startsWith('http://') ||
-    url.startsWith('https://')
-  ) {
-    return url;
-  }
-
-  const cached = await indexedDbStore.getCachedMediaByUrl(url);
-  if (cached && cached.blob && cached.blob.size > 0) {
-    const key = normalizeMediaUrlCacheKey(url);
-    const existing = memoizedObjectUrls.get(key);
-    if (
-      existing &&
-      existing.cachedAt === cached.cachedAt &&
-      existing.sizeBytes === cached.sizeBytes
-    ) {
-      return existing.objectUrl;
-    }
-    if (existing) {
-      try {
-        URL.revokeObjectURL(existing.objectUrl);
-      } catch {
-        // ignore
-      }
-    }
-    const objectUrl = URL.createObjectURL(cached.blob);
-    memoizedObjectUrls.set(key, {
-      cachedAt: cached.cachedAt,
-      sizeBytes: cached.sizeBytes,
-      objectUrl,
-    });
-    return objectUrl;
-  }
-
-  if (url.startsWith('idb://')) {
-    return null;
-  }
-
   return resolveApiUrl(url);
 }
 
@@ -104,32 +40,22 @@ export async function downloadProjectAsset(opts: {
 }): Promise<void> {
   const rawTarget = opts.url || opts.localUrl;
   if (!rawTarget) return;
-
-  let blob: Blob | null = null;
-  const cached = await indexedDbStore.getCachedMediaByUrl(rawTarget);
-  if (cached && cached.blob && cached.blob.size > 0) {
-    blob = cached.blob;
-  } else {
-    const targetUrl = resolveApiUrl(rawTarget);
-    const fetchUrl =
-      targetUrl.startsWith('blob:') || targetUrl.startsWith('data:')
-        ? targetUrl
-        : `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}download=1`;
-    const res = await fetch(fetchUrl);
-    if (!res.ok) {
-      throw new Error(`Download failed (HTTP ${res.status}): Asset is unavailable.`);
-    }
-    blob = await res.blob();
+  const targetUrl = resolveApiUrl(rawTarget);
+  try {
+    const res = await fetch(targetUrl);
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = opts.filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+  } catch (err) {
+    console.error('Download error:', err);
+    window.open(targetUrl, '_blank');
   }
-
-  const blobUrl = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = blobUrl;
-  a.download = opts.filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 2500);
 }
 
 export async function hydrateProjectAssetsFromCloud(_project: Project): Promise<Project> {

@@ -1,66 +1,64 @@
-import { optionsResponse } from '../_lib/http.ts';
-import { serveMediaKey } from '../_lib/storage.ts';
-import type { Env } from '../_lib/types.ts';
+/**
+ * Cloudflare Pages Function: Proxy /media/* requests to the Node.js Express backend.
+ */
+
+interface Env {
+  BACKEND_URL?: string;
+  VITE_API_BASE_URL?: string;
+  API_URL?: string;
+}
 
 export const onRequest = async (context: {
   request: Request;
   env: Env;
-  params: { catchall?: string[] | string };
+  params: { catchall?: string[] };
 }): Promise<Response> => {
-  const { request, env, params } = context;
-
-  if (request.method === 'OPTIONS') {
-    return optionsResponse(request);
-  }
-
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
-    return new Response('Method Not Allowed', { status: 405 });
-  }
-
-  const rawParts = Array.isArray(params.catchall)
-    ? params.catchall
-    : typeof params.catchall === 'string'
-    ? params.catchall.split('/').filter(Boolean)
-    : [];
+  const { request, env } = context;
+  const backendBase = (
+    env.BACKEND_URL ||
+    env.VITE_API_BASE_URL ||
+    env.API_URL ||
+    ''
+  ).replace(/\/+$/, '');
 
   const url = new URL(request.url);
-  const key =
-    rawParts.length > 0
-      ? rawParts.join('/')
-      : url.pathname.replace(/^\/media\//, '');
 
-  if (key) {
-    const served = await serveMediaKey(env, request, key);
-    if (served) return served;
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'Range, Authorization',
+      },
+    });
   }
 
-  // Optional external Node backend passthrough if explicitly attached
-  const backendBase = (env.BACKEND_URL || env.VITE_API_BASE_URL || env.API_URL || '').replace(
-    /\/+$/,
-    ''
-  );
-  if (backendBase) {
-    try {
-      const upstream = await fetch(`${backendBase}${url.pathname}${url.search}`, {
-        method: request.method,
-        headers: request.headers,
-        redirect: 'follow',
-      });
-      const headers = new Headers(upstream.headers);
-      headers.set('Access-Control-Allow-Origin', request.headers.get('Origin') || '*');
-      headers.set(
-        'Access-Control-Expose-Headers',
-        'Content-Length, Content-Range, Accept-Ranges, Content-Disposition'
-      );
-      return new Response(upstream.body, {
-        status: upstream.status,
-        statusText: upstream.statusText,
-        headers,
-      });
-    } catch {
-      return new Response('Failed to reach upstream media server', { status: 502 });
-    }
+  if (!backendBase) {
+    return new Response('Media backend not configured', { status: 503 });
   }
 
-  return new Response('Media asset not found', { status: 404 });
+  const targetUrl = `${backendBase}${url.pathname}${url.search}`;
+  const forwardHeaders = new Headers(request.headers);
+  forwardHeaders.set('x-forwarded-host', url.host);
+
+  try {
+    const upstream = await fetch(targetUrl, {
+      method: request.method,
+      headers: forwardHeaders,
+      redirect: 'follow',
+    });
+
+    const headers = new Headers(upstream.headers);
+    headers.set('Access-Control-Allow-Origin', '*');
+    headers.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, Content-Disposition');
+
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers,
+    });
+  } catch {
+    return new Response('Failed to proxy media asset', { status: 502 });
+  }
 };

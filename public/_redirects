@@ -1,6 +1,2 @@
-# Cloudflare Pages API and SPA routing
-/api/*    /api/*    200
-/media/*  /media/*  200
-/storage/* /storage/* 200
-/*        /index.html 200
-
+# Cloudflare Pages SPA routing
+/*    /index.html   200

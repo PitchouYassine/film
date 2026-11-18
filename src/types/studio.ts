@@ -1286,10 +1286,6 @@ export interface SystemStatus {
   tempRetentionHours: number;
   supportedVideoFormats: string[];
   supportedLogoFormats: string[];
-  runtime?: 'express' | 'cloudflare-pages';
-  d1Available?: boolean;
-  r2Available?: boolean;
-  clientProcessingAvailable?: boolean;
 }
 
 export type FishConnectionStatus = 'connected' | 'not_connected' | 'error';

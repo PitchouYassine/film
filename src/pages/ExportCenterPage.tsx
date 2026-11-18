@@ -26,7 +26,6 @@ import {
 } from '../types/studio';
 import { api } from '../lib/api';
 import { formatBytes, formatDurationShort } from '../lib/formatters';
-import { indexedDbStore } from '../lib/indexedDbStore';
 import {
   downloadProjectAsset,
   getCloudSession,
@@ -108,15 +107,6 @@ export function ExportCenterPage({
       setExportValidationMsg(null);
       setVideoMetaInfo(null);
       try {
-        const cached = await indexedDbStore.getCachedMediaByUrl(url);
-        if (cached && cached.blob && cached.blob.size >= 1024) {
-          const playUrl = await resolvePlayableAssetUrl(url, project.cloudAssets);
-          if (playUrl) {
-            setResolvedExportUrl(playUrl);
-            setExportValidation('valid');
-            return;
-          }
-        }
         const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
         const size = Number(res.headers.get('content-length') || 0);
         if (res.ok && size >= 1024) {
@@ -124,13 +114,28 @@ export function ExportCenterPage({
           setExportValidation('valid');
           return;
         }
+        // Cross-device fallback: resolve authenticated signed URL from Supabase Cloud Storage
+        const signedUrl = await resolvePlayableAssetUrl(url, project.cloudAssets);
+        if (signedUrl) {
+          setResolvedExportUrl(signedUrl);
+          setExportValidation('valid');
+          return;
+        }
         setExportValidation('error');
         setExportValidationMsg(
           !res.ok
-            ? `Exported video file not found locally or in cloud storage (HTTP ${res.status}). Re-render Final MP4.`
+            ? `Exported video file not found locally (HTTP ${res.status}) and no verified cloud copy was found.`
             : 'Exported MP4 is empty or incomplete (0 bytes). Re-render Final MP4.'
         );
       } catch (err) {
+        const signedUrl = await resolvePlayableAssetUrl(url, project.cloudAssets).catch(
+          () => null
+        );
+        if (signedUrl) {
+          setResolvedExportUrl(signedUrl);
+          setExportValidation('valid');
+          return;
+        }
         setExportValidation('error');
         setExportValidationMsg(
           err instanceof Error ? err.message : 'Unable to verify exported MP4.'

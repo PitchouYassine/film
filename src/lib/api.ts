@@ -23,20 +23,6 @@ import {
   VideoMetadata,
 } from '../types/studio';
 import type { FontCatalogItem } from './fontCatalog';
-import { indexedDbStore } from './indexedDbStore';
-import {
-  compressVideoInBrowser,
-  createSampleVideoInBrowser,
-  detectOriginalCaptionsInBrowser,
-  extractAudioTrackInBrowser,
-  extractProjectWaveformsInBrowser,
-  extractTimelineFilmstripInBrowser,
-  generateThumbnailsInBrowser,
-  probeVideoInBrowser,
-  resolveMediaBlob,
-  trimAndMergeDubClipsInBrowser,
-} from './clientMediaEngine';
-import { renderProjectExportInBrowser } from './clientExportRenderer';
 
 export interface LocalAssetManifestItem {
   localUrl: string;
@@ -52,9 +38,9 @@ export interface LocalAssetManifestItem {
 }
 
 export const API_BASE_URL = (
-  (typeof import.meta !== 'undefined' && (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_BASE_URL) ||
-  (typeof import.meta !== 'undefined' && (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_BACKEND_URL) ||
-  (typeof import.meta !== 'undefined' && (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_APP_URL) ||
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_BASE_URL) ||
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_BACKEND_URL) ||
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_APP_URL) ||
   ''
 ).replace(/\/+$/, '');
 
@@ -88,9 +74,9 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     let errMsg = typeof data?.error === 'string' ? data.error : '';
     if (!errMsg) {
       if (res.status === 405) {
-        errMsg = `Request failed (405 Method Not Allowed): Static hosting rejected ${
+        errMsg = `Request failed (405 Method Not Allowed): Cloudflare Pages only serves static files and rejected the ${
           init?.method || 'POST'
-        } request to ${url}. Ensure Cloudflare Pages Functions are deployed.`;
+        } request. Set BACKEND_URL in Cloudflare Pages or VITE_API_BASE_URL to your Express backend.`;
       } else {
         errMsg = `Request failed (${res.status})`;
       }
@@ -101,126 +87,6 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error('Server returned an unexpected non-JSON response. Please try again.');
   }
   return data as T;
-}
-
-let cachedSystemStatus: SystemStatus | null = null;
-let statusInflight: Promise<SystemStatus> | null = null;
-
-async function getCapabilities(): Promise<SystemStatus> {
-  if (cachedSystemStatus) return cachedSystemStatus;
-  if (!statusInflight) {
-    statusInflight = request<SystemStatus>('/api/system/status')
-      .then((s) => {
-        cachedSystemStatus = s;
-        return s;
-      })
-      .finally(() => {
-        statusInflight = null;
-      });
-  }
-  return statusInflight;
-}
-
-async function shouldUseBrowserMedia(): Promise<boolean> {
-  try {
-    const caps = await getCapabilities();
-    return caps.runtime === 'cloudflare-pages' || !caps.ffmpegAvailable;
-  } catch {
-    return false;
-  }
-}
-
-const clientJobsMap = new Map<string, RenderJob>();
-
-function makeClientJob(params: {
-  projectId: string;
-  type: RenderJob['type'];
-  stage: string;
-  progress?: number;
-}): RenderJob {
-  const now = new Date().toISOString();
-  const job: RenderJob = {
-    id: `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    projectId: params.projectId,
-    type: params.type,
-    status: 'processing',
-    progress: params.progress ?? 4,
-    stage: params.stage,
-    etaSeconds: null,
-    outputUrl: null,
-    outputSize: null,
-    error: null,
-    createdAt: now,
-    updatedAt: now,
-  };
-  clientJobsMap.set(job.id, job);
-  void request('/api/jobs', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(job),
-  }).catch(() => {});
-  return { ...job };
-}
-
-function patchClientJob(jobId: string, patch: Partial<RenderJob>, syncD1 = false): RenderJob | null {
-  const existing = clientJobsMap.get(jobId);
-  if (!existing) return null;
-  const next: RenderJob = {
-    ...existing,
-    ...patch,
-    updatedAt: new Date().toISOString(),
-  };
-  clientJobsMap.set(jobId, next);
-  if (syncD1 || next.status !== 'processing') {
-    void request(`/api/jobs/${jobId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    }).catch(() => {});
-  }
-  return next;
-}
-
-async function storeAssetBlobHybrid(params: {
-  projectId: string | null;
-  bucket: string;
-  kind: string;
-  filename: string;
-  blob: Blob;
-  forceLocalOnly?: boolean;
-}): Promise<{ url: string; storedIn: 'r2' | 'd1' | 'client-only' }> {
-  const caps = await getCapabilities().catch(() => null);
-  const canTryServer = !params.forceLocalOnly && (Boolean(caps?.r2Available) || params.blob.size <= 650_000);
-  const fallbackUrl = `/media/${params.bucket}/${params.filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-
-  if (canTryServer) {
-    try {
-      const fd = new FormData();
-      fd.append('file', params.blob, params.filename);
-      if (params.projectId) fd.append('projectId', params.projectId);
-      fd.append('bucket', params.bucket);
-      fd.append('kind', params.kind);
-      fd.append('filename', params.filename);
-      const res = await request<{ url: string; storedIn: 'r2' | 'd1' | 'client-only' }>(
-        '/api/assets/upload',
-        { method: 'POST', body: fd }
-      );
-      await indexedDbStore.cacheMediaByUrl(res.url, params.blob, params.filename, params.blob.type);
-      return { url: res.url, storedIn: res.storedIn };
-    } catch {
-      // Fallback safely to IndexedDB URL cache
-    }
-  }
-
-  await indexedDbStore.cacheMediaByUrl(fallbackUrl, params.blob, params.filename, params.blob.type);
-  return { url: fallbackUrl, storedIn: 'client-only' };
-}
-
-function decodeBase64ToBlob(b64: string, mimeType = 'audio/mpeg'): Blob {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], { type: mimeType });
 }
 
 export interface PresetApplyOptions {
@@ -238,11 +104,7 @@ export interface PresetWarning {
 }
 
 export const api = {
-  getSystemStatus: async () => {
-    const s = await request<SystemStatus>('/api/system/status');
-    cachedSystemStatus = s;
-    return s;
-  },
+  getSystemStatus: () => request<SystemStatus>('/api/system/status'),
 
   getFishAudioSettings: () =>
     request<FishAudioSettingsSummary>('/api/settings/fish-audio'),
@@ -288,111 +150,28 @@ export const api = {
 
   getSupabaseSchema: () => request<{ sql: string }>('/api/system/supabase-schema'),
 
-  getLocalStorageUsage: async () => {
-    const remote = await request<{
+  getLocalStorageUsage: () =>
+    request<{
       totalBytes: number;
       buckets: Record<string, { bytes: number; files: number }>;
-    }>('/api/system/storage-usage');
-    if (await shouldUseBrowserMedia()) {
-      const local = await indexedDbStore.getCachedMediaUsage();
-      const mergedBuckets: Record<string, { bytes: number; files: number }> = { ...remote.buckets };
-      for (const [b, info] of Object.entries(local.buckets)) {
-        const cur = mergedBuckets[b] || { bytes: 0, files: 0 };
-        mergedBuckets[b] = {
-          bytes: Math.max(cur.bytes, info.bytes),
-          files: Math.max(cur.files, info.files),
-        };
-      }
-      return {
-        totalBytes: Object.values(mergedBuckets).reduce((acc, x) => acc + x.bytes, 0),
-        buckets: mergedBuckets,
-      };
-    }
-    return remote;
-  },
+    }>('/api/system/storage-usage'),
 
-  runCleanup: async () => {
-    const res = await request<{ removedFiles?: number; cleanedFiles?: number }>(
-      '/api/system/cleanup',
-      { method: 'POST' }
-    );
-    return { removedFiles: res.removedFiles ?? res.cleanedFiles ?? 0 };
-  },
+  runCleanup: () => request<{ removedFiles: number }>('/api/system/cleanup', { method: 'POST' }),
 
-  getProjectAssetManifest: async (projectId: string) => {
-    const res = await request<{
+  getProjectAssetManifest: (projectId: string) =>
+    request<{
       assets: LocalAssetManifestItem[];
       totalBytes: number;
       necessaryBytes: number;
       oversizedCount: number;
-    }>(`/api/projects/${projectId}/asset-manifest`);
-    if (await shouldUseBrowserMedia()) {
-      let total = 0;
-      const enriched = await Promise.all(
-        (res.assets || []).map(async (item) => {
-          const cached = await indexedDbStore.getCachedMediaByUrl(item.localUrl);
-          const sizeBytes = item.sizeBytes || cached?.sizeBytes || 0;
-          total += sizeBytes;
-          return {
-            ...item,
-            exists: item.exists || Boolean(cached),
-            sizeBytes,
-            exceedsFree50MbCap: sizeBytes > 50 * 1024 * 1024,
-          };
-        })
-      );
-      return {
-        assets: enriched,
-        totalBytes: total,
-        necessaryBytes: total,
-        oversizedCount: enriched.filter((a) => a.exceedsFree50MbCap).length,
-      };
-    }
-    return res;
-  },
+    }>(`/api/projects/${projectId}/asset-manifest`),
 
-  compressProjectVideo: async (
+  compressProjectVideo: (
     projectId: string,
     preset: 'under-45mb' | '720p-compact' | '480p-compact',
     target: 'source' | 'final-export' = 'source'
-  ) => {
-    if (await shouldUseBrowserMedia()) {
-      const { project } = await api.getProject(projectId);
-      const res = await compressVideoInBrowser(project, preset, target, resolveApiUrl);
-      const bucket = target === 'final-export' ? 'exports' : 'uploads';
-      const stored = await storeAssetBlobHybrid({
-        projectId,
-        bucket,
-        kind: target === 'final-export' ? 'export' : 'video',
-        filename: `${projectId.slice(0, 8)}_${Date.now()}_${res.filename}`,
-        blob: res.blob,
-      });
-      const patch: Partial<Project> =
-        target === 'final-export'
-          ? {
-              lastExportUrl: stored.url,
-              lastExportSize: res.compressedBytes,
-              lastExportedAt: new Date().toISOString(),
-            }
-          : {
-              sourceVideoUrl: stored.url,
-              sourceFilename: res.filename,
-              metadata: res.metadata,
-            };
-      const updated = await api.updateProject(projectId, patch);
-      return {
-        project: updated.project,
-        compressedUrl: stored.url,
-        filename: res.filename,
-        originalSourceUrl: res.originalUrl,
-        originalBytes: res.originalBytes,
-        compressedBytes: res.compressedBytes,
-        metadata: res.metadata,
-        target,
-      };
-    }
-
-    return request<{
+  ) =>
+    request<{
       project: Project;
       compressedUrl: string;
       filename: string;
@@ -405,8 +184,7 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ preset, target }),
-    });
-  },
+    }),
 
   saveProjectThumbnail: async (
     projectId: string,
@@ -426,7 +204,7 @@ export const api = {
     fd.append('height', String(params.height));
     fd.append('format', params.format);
     fd.append('setAsCover', params.setAsCover ? 'true' : 'false');
-    const res = await request<{
+    return request<{
       thumbnail: {
         id: string;
         url: string;
@@ -441,15 +219,6 @@ export const api = {
       method: 'POST',
       body: fd,
     });
-    if (res.thumbnail?.url) {
-      await indexedDbStore.cacheMediaByUrl(
-        res.thumbnail.url,
-        params.blob,
-        `thumb.${params.format}`,
-        params.blob.type
-      );
-    }
-    return res;
   },
 
   upsertProjectFromCloud: (project: Project) =>
@@ -459,25 +228,8 @@ export const api = {
       body: JSON.stringify({ project }),
     }),
 
-  detectOriginalCaptions: async (projectId: string) => {
-    if (await shouldUseBrowserMedia()) {
-      const { project } = await api.getProject(projectId);
-      const detected = await detectOriginalCaptionsInBrowser(project, resolveApiUrl);
-      const updated = await api.updateProject(projectId, {
-        subtitleRemoval: detected.subtitleRemoval,
-        blurs: detected.blurs,
-      });
-      return {
-        project: updated.project,
-        detections: detected.detections,
-        ocrAvailable: detected.ocrAvailable,
-        method: detected.method,
-        analysisMessage: detected.analysisMessage,
-        framesAnalyzed: detected.framesAnalyzed,
-      };
-    }
-
-    return request<{
+  detectOriginalCaptions: (projectId: string) =>
+    request<{
       project: Project;
       detections: NonNullable<Project['subtitleRemoval']>['detections'];
       ocrAvailable: boolean;
@@ -488,8 +240,7 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
-    });
-  },
+    }),
 
   hydrateAssetFromBlob: async (
     projectId: string,
@@ -502,16 +253,6 @@ export const api = {
       targetLocalUrl?: string;
     }
   ) => {
-    if (await shouldUseBrowserMedia()) {
-      const targetUrl =
-        params.targetLocalUrl || `/media/${params.bucket}/${params.filename}`;
-      await indexedDbStore.cacheMediaByUrl(targetUrl, params.blob, params.filename, params.mimeType);
-      return {
-        localUrl: targetUrl,
-        filePath: targetUrl,
-        sizeBytes: params.blob.size,
-      };
-    }
     const fd = new FormData();
     fd.append('file', params.blob, params.filename);
     fd.append('bucket', params.bucket);
@@ -581,68 +322,11 @@ export const api = {
       }
     ),
 
-  rebuildFishDubTrack: async (
+  rebuildFishDubTrack: (
     projectId: string,
     params?: { generatedClips?: Project['voice']['generatedClips'] }
-  ) => {
-    if (await shouldUseBrowserMedia()) {
-      const { project } = await api.getProject(projectId);
-      const clips = params?.generatedClips ?? project.voice.generatedClips ?? [];
-      if (clips.length === 0) {
-        const res = await request<{
-          project: Project;
-          fullDubUrl: string;
-          clips: Project['voice']['generatedClips'];
-        }>(`/api/projects/${projectId}/dubbing/rebuild-track`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ generatedClips: [], fullDubUrl: '' }),
-        });
-        return res;
-      }
-
-      const loadedClips = await Promise.all(
-        clips.map(async (c) => ({
-          segmentId: c.segmentId,
-          start: c.start,
-          end: c.end,
-          audioUrl: c.audioUrl,
-          blob: await resolveMediaBlob(c.audioUrl, resolveApiUrl),
-          text: c.text,
-          speaker: c.speaker,
-          speed: c.speed,
-        }))
-      );
-      const merged = await trimAndMergeDubClipsInBrowser({
-        captions: project.captions,
-        clips: loadedClips,
-        syncMode: project.voice.syncMode,
-        continuousPauseMs: project.voice.continuousPauseMs,
-        originalDuration: project.metadata?.duration || 15,
-      });
-      const storedDub = await storeAssetBlobHybrid({
-        projectId,
-        bucket: 'audio',
-        kind: 'voice',
-        filename: `fish_dub_rebuilt_${projectId.slice(0, 8)}_${Date.now()}.mp3`,
-        blob: merged.fullDubBlob,
-      });
-      return request<{
-        project: Project;
-        fullDubUrl: string;
-        clips: Project['voice']['generatedClips'];
-      }>(`/api/projects/${projectId}/dubbing/rebuild-track`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          generatedClips: merged.generatedClips,
-          fullDubUrl: storedDub.url,
-          syncPlan: merged.syncPlan,
-        }),
-      });
-    }
-
-    return request<{
+  ) =>
+    request<{
       project: Project;
       fullDubUrl: string;
       clips: Project['voice']['generatedClips'];
@@ -650,8 +334,7 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params || {}),
-    });
-  },
+    }),
 
   updateSavedFishVoice: (
     id: string,
@@ -706,17 +389,13 @@ export const api = {
     const fd = new FormData();
     fd.append('file', file);
     if (family) fd.append('family', family);
-    const res = await request<{ font: SavedFontAsset; fonts: SavedFontAsset[]; exportCompatible?: boolean }>(
+    return request<{ font: SavedFontAsset; fonts: SavedFontAsset[]; exportCompatible?: boolean }>(
       '/api/fonts',
       {
         method: 'POST',
         body: fd,
       }
     );
-    if (res.font?.url) {
-      await indexedDbStore.cacheMediaByUrl(res.font.url, file, file.name, file.type);
-    }
-    return res;
   },
 
   deleteCustomFont: (id: string) =>
@@ -874,116 +553,48 @@ export const api = {
   deleteProject: (id: string) =>
     request<{ deleted: boolean }>(`/api/projects/${id}`, { method: 'DELETE' }),
 
-  createSampleVideo: async (projectId: string) => {
-    if (await shouldUseBrowserMedia()) {
-      const sample = await createSampleVideoInBrowser();
-      const storedVideo = await storeAssetBlobHybrid({
-        projectId,
-        bucket: 'uploads',
-        kind: 'video',
-        filename: `${projectId.slice(0, 8)}_${Date.now()}_${sample.filename}`,
-        blob: sample.blob,
-      });
-      let thumbnailUrl: string | null = sample.thumbnailDataUrl;
-      if (sample.thumbnailDataUrl) {
-        try {
-          const thumbBlob = await (await fetch(sample.thumbnailDataUrl)).blob();
-          const storedThumb = await storeAssetBlobHybrid({
-            projectId,
-            bucket: 'thumbs',
-            kind: 'thumbnail',
-            filename: `thumb_${projectId.slice(0, 8)}_${Date.now()}.jpg`,
-            blob: thumbBlob,
-          });
-          thumbnailUrl = storedThumb.url;
-        } catch {
-          // keep data URL thumbnail
-        }
-      }
-      const dur = Math.max(0.5, sample.metadata.duration || 8);
-      return api.updateProject(projectId, {
-        sourceVideoUrl: storedVideo.url,
-        sourceFilename: sample.filename,
-        thumbnailUrl,
-        metadata: sample.metadata,
-        waveformPeaks: sample.waveformPeaks,
-        videoClips: [
-          {
-            id: 'vclip_main',
-            label: sample.filename,
-            sourceStart: 0,
-            sourceEnd: dur,
-            timelineStart: 0,
-            speed: 1.0,
-            audioUnlinked: false,
-          },
-        ],
-        originalAudioClips: [],
-      });
-    }
-
-    return request<{ project: Project }>(`/api/projects/${projectId}/sample-video`, {
+  createSampleVideo: (projectId: string) =>
+    request<{ project: Project }>(`/api/projects/${projectId}/sample-video`, {
       method: 'POST',
-    });
-  },
+    }),
 
   uploadLogo: async (projectId: string, file: File) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await request<{ project: Project; logo?: { url: string } }>(
-      `/api/projects/${projectId}/logo`,
-      {
-        method: 'POST',
-        body: fd,
-      }
-    );
-    const latestUrl = res.logo?.url || res.project?.logos?.[res.project.logos.length - 1]?.url;
-    if (latestUrl) {
-      await indexedDbStore.cacheMediaByUrl(latestUrl, file, file.name, file.type);
-    }
-    return { project: res.project };
+    return request<{ project: Project }>(`/api/projects/${projectId}/logo`, {
+      method: 'POST',
+      body: fd,
+    });
   },
 
   uploadCanvasBackground: async (projectId: string, file: File) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await request<{ project: Project; url: string; filename: string }>(
+    return request<{ project: Project; url: string; filename: string }>(
       `/api/projects/${projectId}/canvas-bg`,
       {
         method: 'POST',
         body: fd,
       }
     );
-    if (res.url) {
-      await indexedDbStore.cacheMediaByUrl(res.url, file, res.filename || file.name, file.type);
-    }
-    return res;
   },
 
   uploadMusic: async (projectId: string, file: File) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await request<{ project: Project }>(`/api/projects/${projectId}/music`, {
+    return request<{ project: Project }>(`/api/projects/${projectId}/music`, {
       method: 'POST',
       body: fd,
     });
-    if (res.project?.voice?.bgMusicUrl) {
-      await indexedDbStore.cacheMediaByUrl(res.project.voice.bgMusicUrl, file, file.name, file.type);
-    }
-    return res;
   },
 
   uploadSfx: async (projectId: string, file: File) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await request<{ project: Project }>(`/api/projects/${projectId}/sfx`, {
+    return request<{ project: Project }>(`/api/projects/${projectId}/sfx`, {
       method: 'POST',
       body: fd,
     });
-    if (res.project?.voice?.sfxUrl) {
-      await indexedDbStore.cacheMediaByUrl(res.project.voice.sfxUrl, file, file.name, file.type);
-    }
-    return res;
   },
 
   uploadMask: (projectId: string, blurId: string, maskBase64: string) =>
@@ -993,78 +604,31 @@ export const api = {
       body: JSON.stringify({ blurId, maskBase64 }),
     }),
 
-  extractAudio: async (projectId: string) => {
-    if (await shouldUseBrowserMedia()) {
-      const { project } = await api.getProject(projectId);
-      const extracted = await extractAudioTrackInBrowser(
-        project,
-        { format: 'mp3', bitrate: '192k' },
-        resolveApiUrl
-      );
-      const stored = await storeAssetBlobHybrid({
-        projectId,
-        bucket: 'audio',
-        kind: 'audio',
-        filename: `${projectId.slice(0, 8)}_extracted_${Date.now()}.mp3`,
-        blob: extracted.blob,
-      });
-      return {
-        audioUrl: stored.url,
-        downloadUrl: stored.url,
-        filename: extracted.filename,
-      };
-    }
-
-    return request<{ audioUrl: string; downloadUrl: string; filename: string }>(
+  extractAudio: (projectId: string) =>
+    request<{ audioUrl: string; downloadUrl: string; filename: string }>(
       `/api/projects/${projectId}/audio/extract`,
       { method: 'POST' }
-    );
-  },
+    ),
 
-  transcribe: async (projectId: string, params?: { provider?: 'fish' | 'gemini'; sourceLanguage?: string }) => {
-    if (await shouldUseBrowserMedia()) {
-      return api.transcribeWithFish(projectId, params?.sourceLanguage);
-    }
-    return request<{ project: Project; detectedLanguage: string; segmentCount: number }>(
+  transcribe: (projectId: string, params?: { provider?: 'fish' | 'gemini'; sourceLanguage?: string }) =>
+    request<{ project: Project; detectedLanguage: string; segmentCount: number }>(
       `/api/projects/${projectId}/transcribe`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params || {}),
       }
-    );
-  },
+    ),
 
-  transcribeWithFish: async (projectId: string, sourceLanguage?: string) => {
-    if (await shouldUseBrowserMedia()) {
-      const { project } = await api.getProject(projectId);
-      const extracted = await extractAudioTrackInBrowser(
-        project,
-        { format: 'mp3', mono: true, sampleRate: 16000, bitrate: '48k' },
-        resolveApiUrl
-      );
-      const fd = new FormData();
-      fd.append('audio', extracted.blob, 'speech_track.mp3');
-      if (sourceLanguage) fd.append('sourceLanguage', sourceLanguage);
-      fd.append('duration', String(extracted.durationSec));
-      return request<{ project: Project; detectedLanguage: string; segmentCount: number }>(
-        `/api/projects/${projectId}/dubbing/transcribe`,
-        {
-          method: 'POST',
-          body: fd,
-        }
-      );
-    }
-
-    return request<{ project: Project; detectedLanguage: string; segmentCount: number }>(
+  transcribeWithFish: (projectId: string, sourceLanguage?: string) =>
+    request<{ project: Project; detectedLanguage: string; segmentCount: number }>(
       `/api/projects/${projectId}/dubbing/transcribe`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sourceLanguage }),
       }
-    );
-  },
+    ),
 
   importCaptions: (projectId: string, content: string) =>
     request<{ project: Project; count: number }>(`/api/projects/${projectId}/captions/import`, {
@@ -1094,171 +658,27 @@ export const api = {
       body: JSON.stringify(params),
     }),
 
-  generateFishDub: async (
+  generateFishDub: (
     projectId: string,
     params: { voice: Project['voice']; captions?: CaptionSegment[]; useTranslated?: boolean }
-  ) => {
-    if (await shouldUseBrowserMedia()) {
-      const { project } = await api.getProject(projectId);
-      const sourceCaptions =
-        params.captions && params.captions.length > 0 ? params.captions : project.captions;
-      if (!sourceCaptions || sourceCaptions.length === 0) {
-        throw new Error('No caption segments available to generate Fish Audio dubbing.');
-      }
-      const useTranslated = params.useTranslated !== false;
-      const job = makeClientJob({
-        projectId,
-        type: 'voice',
-        stage: `Synthesizing ${sourceCaptions.length} segments with Fish Audio...`,
-        progress: 5,
-      });
-
-      void (async () => {
-        try {
-          const synthClips: Array<{
-            segmentId: string;
-            start: number;
-            end: number;
-            audioUrl: string;
-            blob: Blob;
-            text: string;
-            speaker?: string;
-            speed: number;
-          }> = [];
-
-          for (let i = 0; i < sourceCaptions.length; i++) {
-            const seg = sourceCaptions[i];
-            const spokenText = (useTranslated ? seg.translatedText || seg.text : seg.text).trim();
-            if (!spokenText) continue;
-
-            const pct = Math.min(64, Math.round(6 + ((i + 1) / sourceCaptions.length) * 56));
-            patchClientJob(job.id, {
-              progress: pct,
-              stage: `Synthesizing segment ${i + 1} of ${sourceCaptions.length} via Fish Audio`,
-            });
-
-            const segRes = await request<{
-              segmentId: string;
-              audioUrl: string;
-              audioBase64?: string;
-            }>(`/api/projects/${projectId}/dubbing/synthesize-segment`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                segmentId: seg.id,
-                text: spokenText,
-                referenceId: params.voice.fishReferenceId || project.voice.fishReferenceId,
-                returnBase64: true,
-              }),
-            });
-
-            const segBlob = segRes.audioBase64
-              ? decodeBase64ToBlob(segRes.audioBase64, 'audio/mpeg')
-              : await resolveMediaBlob(segRes.audioUrl, resolveApiUrl);
-            const segUrl = segRes.audioUrl || `/media/audio/fish_seg_${projectId.slice(0, 8)}_${seg.id}.mp3`;
-            await indexedDbStore.cacheMediaByUrl(segUrl, segBlob, `seg_${seg.id}.mp3`, 'audio/mpeg');
-
-            synthClips.push({
-              segmentId: seg.id,
-              start: seg.start,
-              end: seg.end,
-              audioUrl: segUrl,
-              blob: segBlob,
-              text: spokenText,
-              speaker: seg.speaker,
-              speed: 1.0,
-            });
-          }
-
-          if (synthClips.length === 0) {
-            throw new Error('No non-empty caption segments could be synthesized.');
-          }
-
-          const merged = await trimAndMergeDubClipsInBrowser({
-            captions: sourceCaptions,
-            clips: synthClips,
-            syncMode: params.voice.syncMode,
-            continuousPauseMs: params.voice.continuousPauseMs,
-            originalDuration: project.metadata?.duration || 15,
-            onProgress: (pct, stage) => patchClientJob(job.id, { progress: pct, stage }),
-          });
-
-          patchClientJob(job.id, { progress: 95, stage: 'Saving merged dub track...' }, true);
-          const storedDub = await storeAssetBlobHybrid({
-            projectId,
-            bucket: 'audio',
-            kind: 'voice',
-            filename: `fish_dub_${projectId.slice(0, 8)}_${Date.now()}.mp3`,
-            blob: merged.fullDubBlob,
-          });
-
-          await api.updateProject(projectId, {
-            voice: {
-              ...project.voice,
-              ...params.voice,
-              enabled: true,
-              provider: 'fish',
-              voiceMuted: false,
-              speakingSpeed: 1.0,
-              generatedClips: merged.generatedClips,
-              fullDubUrl: storedDub.url,
-              syncPlan: merged.syncPlan,
-            },
-          });
-
-          patchClientJob(
-            job.id,
-            {
-              status: 'completed',
-              progress: 100,
-              stage: 'Fish Audio dubbing completed',
-              outputUrl: storedDub.url,
-              outputSize: merged.fullDubBlob.size,
-              etaSeconds: 0,
-            },
-            true
-          );
-        } catch (err) {
-          patchClientJob(
-            job.id,
-            {
-              status: 'failed',
-              stage: 'Fish Audio dubbing failed',
-              error: err instanceof Error ? err.message : String(err),
-            },
-            true
-          );
-        }
-      })();
-
-      return { job };
-    }
-
-    return request<{ job: RenderJob }>(
+  ) =>
+    request<{ job: RenderJob }>(
       `/api/projects/${projectId}/dubbing/generate`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
       }
-    );
-  },
+    ),
 
-  resyncFishDub: async (projectId: string, syncMode: SyncMode, continuousPauseMs?: number) => {
-    const res = await request<{ project: Project }>(`/api/projects/${projectId}/dubbing/resync`, {
+  resyncFishDub: (projectId: string, syncMode: SyncMode, continuousPauseMs?: number) =>
+    request<{ project: Project }>(`/api/projects/${projectId}/dubbing/resync`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ syncMode, continuousPauseMs }),
-    });
-    if ((await shouldUseBrowserMedia()) && res.project.voice.generatedClips?.length) {
-      return api.rebuildFishDubTrack(projectId, {
-        generatedClips: res.project.voice.generatedClips,
-      });
-    }
-    return res;
-  },
+    }),
 
-  regenerateFishSegments: async (
+  regenerateFishSegments: (
     projectId: string,
     params: {
       segmentIds: string[];
@@ -1266,117 +686,8 @@ export const api = {
       voice?: Partial<Project['voice']>;
       useTranslated?: boolean;
     }
-  ) => {
-    if (await shouldUseBrowserMedia()) {
-      const { project } = await api.getProject(projectId);
-      const sourceCaptions =
-        params.captions && params.captions.length > 0 ? params.captions : project.captions;
-      const targetIds = new Set(params.segmentIds || []);
-      const useTranslated = params.useTranslated !== false;
-      const existingClipMap = new Map(
-        (project.voice.generatedClips || []).map((c) => [c.segmentId, c])
-      );
-      const referenceId = params.voice?.fishReferenceId ?? project.voice.fishReferenceId;
-
-      const combinedClips: Array<{
-        segmentId: string;
-        start: number;
-        end: number;
-        audioUrl: string;
-        blob: Blob;
-        text: string;
-        speaker?: string;
-        speed?: number;
-      }> = [];
-
-      const regeneratedIds: string[] = [];
-      for (const seg of sourceCaptions) {
-        const spokenText = (useTranslated ? seg.translatedText || seg.text : seg.text).trim();
-        if (!spokenText) continue;
-
-        if (targetIds.has(seg.id) || !existingClipMap.has(seg.id)) {
-          const segRes = await request<{
-            segmentId: string;
-            audioUrl: string;
-            audioBase64?: string;
-          }>(`/api/projects/${projectId}/dubbing/synthesize-segment`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              segmentId: seg.id,
-              text: spokenText,
-              referenceId,
-              returnBase64: true,
-            }),
-          });
-          const blob = segRes.audioBase64
-            ? decodeBase64ToBlob(segRes.audioBase64, 'audio/mpeg')
-            : await resolveMediaBlob(segRes.audioUrl, resolveApiUrl);
-          const url = segRes.audioUrl || `/media/audio/fish_seg_${projectId.slice(0, 8)}_${seg.id}.mp3`;
-          await indexedDbStore.cacheMediaByUrl(url, blob, `seg_${seg.id}.mp3`, 'audio/mpeg');
-          combinedClips.push({
-            segmentId: seg.id,
-            start: seg.start,
-            end: seg.end,
-            audioUrl: url,
-            blob,
-            text: spokenText,
-            speaker: seg.speaker,
-            speed: existingClipMap.get(seg.id)?.speed ?? 1.0,
-          });
-          regeneratedIds.push(seg.id);
-        } else {
-          const existing = existingClipMap.get(seg.id)!;
-          const blob = await resolveMediaBlob(existing.audioUrl, resolveApiUrl);
-          combinedClips.push({
-            segmentId: existing.segmentId,
-            start: seg.start,
-            end: seg.end,
-            audioUrl: existing.audioUrl,
-            blob,
-            text: spokenText,
-            speaker: existing.speaker,
-            speed: existing.speed,
-          });
-        }
-      }
-
-      const merged = await trimAndMergeDubClipsInBrowser({
-        captions: sourceCaptions,
-        clips: combinedClips,
-        syncMode: params.voice?.syncMode || project.voice.syncMode,
-        continuousPauseMs: params.voice?.continuousPauseMs ?? project.voice.continuousPauseMs,
-        originalDuration: project.metadata?.duration || 15,
-      });
-
-      const storedDub = await storeAssetBlobHybrid({
-        projectId,
-        bucket: 'audio',
-        kind: 'voice',
-        filename: `fish_dub_regen_${projectId.slice(0, 8)}_${Date.now()}.mp3`,
-        blob: merged.fullDubBlob,
-      });
-
-      const updated = await api.updateProject(projectId, {
-        voice: {
-          ...project.voice,
-          ...(params.voice || {}),
-          enabled: true,
-          provider: 'fish',
-          generatedClips: merged.generatedClips,
-          fullDubUrl: storedDub.url,
-          syncPlan: merged.syncPlan,
-        },
-      });
-
-      return {
-        project: updated.project,
-        regeneratedIds,
-        fullDubUrl: storedDub.url,
-      };
-    }
-
-    return request<{
+  ) =>
+    request<{
       project: Project;
       regeneratedIds: string[];
       fullDubUrl: string;
@@ -1384,8 +695,7 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
-    });
-  },
+    }),
 
   previewVoice: (
     projectId: string,
@@ -1431,139 +741,31 @@ export const api = {
       body: JSON.stringify(params),
     }),
 
-  generateThumbnails: async (projectId: string) => {
-    if (await shouldUseBrowserMedia()) {
-      const { project } = await api.getProject(projectId);
-      return generateThumbnailsInBrowser(project, resolveApiUrl);
-    }
-
-    return request<{
+  generateThumbnails: (projectId: string) =>
+    request<{
       thumbnails: string[];
       sourceMode?: 'final-export' | 'edited-source';
       suggestedTitle: string;
       suggestedSubtitle: string;
       suggestedTitles?: string[];
       translationMissingWarning?: boolean;
-    }>(`/api/projects/${projectId}/thumbnails/generate`, { method: 'POST' });
-  },
+    }>(`/api/projects/${projectId}/thumbnails/generate`, { method: 'POST' }),
 
-  startExport: async (projectId: string, exportSettings: Project['exportSettings']) => {
-    if (await shouldUseBrowserMedia()) {
-      const updatedRes = await api.updateProject(projectId, { exportSettings });
-      const projectToRender = updatedRes.project;
-      const job = makeClientJob({
-        projectId,
-        type: 'render',
-        stage: 'Preparing browser FFmpeg WebAssembly MP4 render...',
-        progress: 2,
-      });
-
-      let lastSyncedPct = 0;
-      void (async () => {
-        try {
-          const rendered = await renderProjectExportInBrowser({
-            project: projectToRender,
-            resolveUrlFn: resolveApiUrl,
-            onProgress: (pct, stage, etaSec) => {
-              const shouldSync = pct - lastSyncedPct >= 15 || pct === 100;
-              if (shouldSync) lastSyncedPct = pct;
-              patchClientJob(job.id, { progress: pct, stage, etaSeconds: etaSec }, shouldSync);
-            },
-          });
-
-          patchClientJob(job.id, { progress: 98, stage: 'Saving rendered MP4 & updating project...' }, true);
-          const storedExport = await storeAssetBlobHybrid({
-            projectId,
-            bucket: 'exports',
-            kind: 'export',
-            filename: rendered.filename,
-            blob: rendered.blob,
-          });
-          const exportedAt = new Date().toISOString();
-          await api.updateProject(projectId, {
-            lastExportUrl: storedExport.url,
-            lastExportSize: rendered.sizeBytes,
-            lastExportedAt: exportedAt,
-          });
-
-          patchClientJob(
-            job.id,
-            {
-              status: 'completed',
-              progress: 100,
-              stage: 'Export completed',
-              outputUrl: storedExport.url,
-              outputSize: rendered.sizeBytes,
-              etaSeconds: 0,
-            },
-            true
-          );
-        } catch (err) {
-          patchClientJob(
-            job.id,
-            {
-              status: 'failed',
-              stage: 'Export failed',
-              error: err instanceof Error ? err.message : String(err),
-            },
-            true
-          );
-        }
-      })();
-
-      return { job };
-    }
-
-    return request<{ job: RenderJob }>(`/api/projects/${projectId}/export`, {
+  startExport: (projectId: string, exportSettings: Project['exportSettings']) =>
+    request<{ job: RenderJob }>(`/api/projects/${projectId}/export`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ exportSettings }),
-    });
-  },
+    }),
 
-  listProjectJobs: async (projectId: string) => {
-    const res = await request<{ jobs: RenderJob[] }>(`/api/projects/${projectId}/jobs`);
-    const merged = new Map<string, RenderJob>();
-    for (const j of res.jobs || []) merged.set(j.id, j);
-    for (const j of clientJobsMap.values()) {
-      if (j.projectId === projectId) merged.set(j.id, j);
-    }
-    return {
-      jobs: Array.from(merged.values()).sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      ),
-    };
-  },
+  listProjectJobs: (projectId: string) =>
+    request<{ jobs: RenderJob[] }>(`/api/projects/${projectId}/jobs`),
 
-  getJob: async (jobId: string) => {
-    const local = clientJobsMap.get(jobId);
-    if (local) return { job: { ...local } };
-    return request<{ job: RenderJob }>(`/api/jobs/${jobId}`);
-  },
+  getJob: (jobId: string) => request<{ job: RenderJob }>(`/api/jobs/${jobId}`),
 
-  listAllJobs: async () => {
-    const res = await request<{ jobs: RenderJob[] }>('/api/jobs');
-    const merged = new Map<string, RenderJob>();
-    for (const j of res.jobs || []) merged.set(j.id, j);
-    for (const j of clientJobsMap.values()) merged.set(j.id, j);
-    return {
-      jobs: Array.from(merged.values()).sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      ),
-    };
-  },
+  listAllJobs: () => request<{ jobs: RenderJob[] }>('/api/jobs'),
 
-  uploadVideoDirect: async (projectId: string, file: File) => {
-    if (await shouldUseBrowserMedia()) {
-      return uploadVideoChunked({
-        projectId,
-        file,
-        onProgress: () => {},
-      }).then((project) => ({
-        project,
-        metadata: project.metadata as VideoMetadata,
-      }));
-    }
+  uploadVideoDirect: (projectId: string, file: File) => {
     const fd = new FormData();
     fd.append('file', file);
     return request<{ project: Project; metadata: VideoMetadata }>(`/api/projects/${projectId}/video`, {
@@ -1572,25 +774,15 @@ export const api = {
     });
   },
 
-  getTimelineFilmstrip: async (projectId: string, frames?: number) => {
-    if (await shouldUseBrowserMedia()) {
-      const { project } = await api.getProject(projectId);
-      return extractTimelineFilmstripInBrowser(project, frames || 32, resolveApiUrl);
-    }
-    return request<{ frames: FilmstripFrame[]; duration: number }>(
+  getTimelineFilmstrip: (projectId: string, frames?: number) =>
+    request<{ frames: FilmstripFrame[]; duration: number }>(
       frames
         ? `/api/projects/${projectId}/timeline-filmstrip?frames=${frames}`
         : `/api/projects/${projectId}/timeline-filmstrip`
-    );
-  },
+    ),
 
-  getAudioWaveforms: async (projectId: string) => {
-    if (await shouldUseBrowserMedia()) {
-      const { project } = await api.getProject(projectId);
-      return extractProjectWaveformsInBrowser(project, resolveApiUrl);
-    }
-    return request<ProjectAudioWaveforms>(`/api/projects/${projectId}/audio-waveforms`);
-  },
+  getAudioWaveforms: (projectId: string) =>
+    request<ProjectAudioWaveforms>(`/api/projects/${projectId}/audio-waveforms`),
 };
 
 export async function uploadVideoChunked(params: {
@@ -1599,122 +791,7 @@ export async function uploadVideoChunked(params: {
   onProgress: (pct: number, stage: string) => void;
 }): Promise<Project> {
   const { projectId, file, onProgress } = params;
-  const browserMode = await shouldUseBrowserMedia();
-
-  if (browserMode) {
-    onProgress(5, 'Analyzing video & audio streams in browser...');
-    const probed = await probeVideoInBrowser(file, file.name);
-    const CHUNK_SIZE = 5 * 1024 * 1024;
-    const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-
-    onProgress(18, 'Preparing storage session...');
-    const initRes = await request<{
-      uploadId: string;
-      totalChunks: number;
-      storageMode?: 'r2' | 'indexeddb-local';
-      suggestedUrl?: string;
-    }>('/api/uploads/init', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        projectId,
-        filename: file.name,
-        totalSize: file.size,
-        totalChunks,
-      }),
-    });
-
-    if (initRes.storageMode === 'r2') {
-      for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(file.size, start + CHUNK_SIZE);
-        const buffer = await file.slice(start, end).arrayBuffer();
-        const chunkUrl = resolveApiUrl(`/api/uploads/${initRes.uploadId}/chunk?index=${i}`);
-        const chunkRes = await fetch(chunkUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: buffer,
-        });
-        if (!chunkRes.ok) {
-          const errData = await chunkRes.json().catch(() => ({}));
-          throw new Error((errData as { error?: string }).error || `Chunk ${i + 1} upload failed`);
-        }
-        onProgress(Math.round(20 + ((i + 1) / totalChunks) * 70), `Uploading chunk ${i + 1} of ${totalChunks}...`);
-      }
-
-      onProgress(93, 'Finalizing project metadata in D1...');
-      const completeRes = await request<{ project: Project }>(
-        `/api/uploads/${initRes.uploadId}/complete`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            projectId,
-            metadata: probed.metadata,
-            thumbnailDataUrl: probed.thumbnailDataUrl || undefined,
-            waveformPeaks: probed.waveformPeaks,
-          }),
-        }
-      );
-      if (completeRes.project.sourceVideoUrl) {
-        await indexedDbStore.cacheMediaByUrl(
-          completeRes.project.sourceVideoUrl,
-          file,
-          file.name,
-          file.type
-        );
-      }
-      onProgress(100, 'Upload complete');
-      return completeRes.project;
-    }
-
-    // Free Zero-Card Cloudflare D1 + Browser IndexedDB Local Binary Flow
-    onProgress(65, 'Caching source video locally in IndexedDB...');
-    const localVideoUrl =
-      initRes.suggestedUrl ||
-      `/media/uploads/${projectId.slice(0, 8)}_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-    await indexedDbStore.cacheMediaByUrl(localVideoUrl, file, file.name, file.type);
-
-    let thumbnailUrl: string | null = probed.thumbnailDataUrl;
-    if (probed.thumbnailBlob) {
-      const savedThumb = await storeAssetBlobHybrid({
-        projectId,
-        bucket: 'thumbs',
-        kind: 'thumbnail',
-        filename: `thumb_${projectId.slice(0, 8)}_${Date.now()}.jpg`,
-        blob: probed.thumbnailBlob,
-      });
-      thumbnailUrl = savedThumb.url;
-    }
-
-    onProgress(90, 'Saving video metadata & waveform to Cloudflare D1...');
-    const dur = Math.max(0.5, probed.metadata.duration || 10);
-    const { project } = await api.updateProject(projectId, {
-      sourceVideoUrl: localVideoUrl,
-      sourceFilename: file.name,
-      thumbnailUrl,
-      metadata: probed.metadata,
-      waveformPeaks: probed.waveformPeaks,
-      videoClips: [
-        {
-          id: 'vclip_main',
-          label: file.name,
-          sourceStart: 0,
-          sourceEnd: dur,
-          timelineStart: 0,
-          speed: 1.0,
-          audioUnlinked: false,
-        },
-      ],
-      originalAudioClips: [],
-    });
-
-    onProgress(100, 'Upload complete');
-    return project;
-  }
-
-  // Standard Node.js Express server chunked upload flow
-  const CHUNK_SIZE = 5 * 1024 * 1024;
+  const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB chunks
   const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
 
   onProgress(2, 'Initializing chunked upload...');
@@ -1743,9 +820,12 @@ export async function uploadVideoChunked(params: {
     });
     if (!chunkRes.ok) {
       const errData = await chunkRes.json().catch(() => ({}));
-      throw new Error(
-        (errData as { error?: string }).error || `Chunk ${i + 1} upload failed (${chunkRes.status})`
-      );
+      if (chunkRes.status === 405) {
+        throw new Error(
+          `Chunk ${i + 1} upload failed (405 Method Not Allowed): Cloudflare Pages does not support POST requests on static routes. Please set BACKEND_URL in Cloudflare Pages or VITE_API_BASE_URL to point to your Node.js Express server.`
+        );
+      }
+      throw new Error(errData.error || `Chunk ${i + 1} upload failed (${chunkRes.status})`);
     }
 
     const pct = Math.round(5 + ((i + 1) / totalChunks) * 80);
