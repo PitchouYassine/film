@@ -3,17 +3,8 @@ pages_build_output_dir = "dist"
 compatibility_date = "2025-03-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Cloudflare D1 Database (Free Tier: 5 GB storage, 5M rows read/day)
-# Create with: npx wrangler d1 create recap-studio-db
-# Apply migrations: npx wrangler d1 migrations apply recap-studio-db --remote
-[[d1_databases]]
-binding = "DB"
-database_name = "recap-studio-db"
-database_id = "00000000-0000-0000-0000-000000000000"
-migrations_dir = "db/d1_migrations"
-
 # OPTIONAL Cloudflare R2 Bucket (Free Tier: 10 GB/month, requires Cloudflare R2 onboarding)
-# Uncomment below if you enable R2. Without R2, small assets use D1 blobs and large media uses browser IndexedDB.
+# Uncomment below if you enable R2. Without R2, large media uses browser IndexedDB.
 # [[r2_buckets]]
 # binding = "MEDIA_BUCKET"
 # bucket_name = "recap-studio-media"

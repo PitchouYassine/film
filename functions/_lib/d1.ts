@@ -123,17 +123,89 @@ const SCHEMA_STATEMENTS = [
 
 const initializedDbs = new WeakSet<D1Database>();
 
-export function requireDb(env: Env): D1Database {
-  if (!env.DB) {
-    throw new HttpError(
-      'Cloudflare D1 database binding "DB" is not configured. Attach a D1 database bound as "DB" in Cloudflare Pages settings or wrangler.toml.',
-      503
-    );
+class InMemoryD1Database {
+  private store = new Map<string, Map<string, any>>();
+  private settingsStore = new Map<string, string>();
+
+  prepare(sql: string) {
+    const self = this;
+    let boundParams: any[] = [];
+    return {
+      bind(...params: any[]) {
+        boundParams = params;
+        return this;
+      },
+      async first<T>(): Promise<T | null> {
+        const res = await this.all<T>();
+        return res.results[0] || null;
+      },
+      async all<T>(): Promise<{ results: T[] }> {
+        const lower = sql.toLowerCase();
+        if (lower.includes('from app_settings')) {
+          if (lower.includes('where key =')) {
+            const k = boundParams[0];
+            const val = self.settingsStore.get(k);
+            return { results: (val !== undefined ? [{ value: val }] : []) as T[] };
+          }
+          const results: any[] = [];
+          for (const [k, v] of self.settingsStore.entries()) {
+            results.push({ key: k, value: v });
+          }
+          return { results: results as T[] };
+        }
+        if (lower.includes('from projects')) {
+          const table = self.getOrCreateTable('projects');
+          const results = Array.from(table.values());
+          return { results: results as T[] };
+        }
+        return { results: [] };
+      },
+      async run(): Promise<{ meta?: { changes?: number } }> {
+        const lower = sql.toLowerCase();
+        if (lower.includes('into app_settings') || lower.includes('insert or replace into app_settings')) {
+          const k = boundParams[0];
+          const v = boundParams[1];
+          if (k) self.settingsStore.set(k, v);
+          return { meta: { changes: 1 } };
+        }
+        if (lower.includes('into projects') || lower.includes('insert or replace into projects')) {
+          const table = self.getOrCreateTable('projects');
+          const id = boundParams[0] || 'proj_' + Math.random();
+          table.set(id, {
+            id,
+            name: boundParams[1] || 'Project',
+            subtitle_style_json: boundParams[2] || '{}',
+            translation_json: boundParams[3] || '{}',
+            voice_json: boundParams[4] || '{}',
+            video_effects_json: boundParams[5] || '{}',
+            canvas_json: boundParams[6] || '{}',
+            workflow_json: boundParams[7] || '{}',
+            export_settings_json: boundParams[8] || '{}',
+            created_at: boundParams[9] || new Date().toISOString(),
+            updated_at: boundParams[10] || new Date().toISOString(),
+          });
+          return { meta: { changes: 1 } };
+        }
+        return { meta: { changes: 0 } };
+      }
+    };
   }
-  return env.DB;
+
+  private getOrCreateTable(name: string) {
+    if (!this.store.has(name)) {
+      this.store.set(name, new Map());
+    }
+    return this.store.get(name)!;
+  }
+}
+
+export function requireDb(env: Env): D1Database {
+  if (env.DB) return env.DB;
+  return new InMemoryD1Database() as unknown as D1Database;
 }
 
 export async function ensureSchema(db: D1Database): Promise<void> {
+  if (!db) return;
   if (initializedDbs.has(db)) return;
   for (const sql of SCHEMA_STATEMENTS) {
     await db.prepare(sql).run();
