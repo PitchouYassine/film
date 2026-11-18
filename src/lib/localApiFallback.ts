@@ -182,6 +182,39 @@ export async function handleLocalApiFallback<T>(url: string, init?: RequestInit)
     }
   }
 
+  const filmstripMatch = /^\/api\/projects\/([^/]+)\/timeline-filmstrip/.exec(pathname);
+  if (filmstripMatch && method === 'GET') {
+    const projId = filmstripMatch[1];
+    const cached = await idbGet<any[]>('settings', `filmstrip_${projId}`);
+    const proj = await idbGet<Project>('projects', projId);
+    return {
+      frames: cached || [],
+      duration: proj?.metadata?.duration || 0,
+    } as unknown as T;
+  }
+
+  const waveformMatch = /^\/api\/projects\/([^/]+)\/audio-waveforms/.exec(pathname);
+  if (waveformMatch && method === 'GET') {
+    const projId = waveformMatch[1];
+    const proj = await idbGet<Project>('projects', projId);
+    return {
+      orig: proj?.waveformPeaks || [],
+      dub: [],
+      dubClips: {},
+      bgm: [],
+      sfx: [],
+    } as unknown as T;
+  }
+
+  if (pathname === '/api/jobs' && method === 'GET') {
+    return { jobs: [] } as unknown as T;
+  }
+
+  const projJobsMatch = /^\/api\/projects\/([^/]+)\/jobs/.exec(pathname);
+  if (projJobsMatch && method === 'GET') {
+    return { jobs: [] } as unknown as T;
+  }
+
   if (pathname === '/api/presets' && method === 'GET') {
     const presets = await idbList<StudioPreset>('presets');
     return { presets: presets || [] } as unknown as T;

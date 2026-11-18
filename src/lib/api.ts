@@ -850,7 +850,11 @@ export async function uploadVideoChunked(params: {
     onProgress(5, 'Backend server offline. Processing video locally in browser...');
     const result = await processVideoUploadInBrowser(file, onProgress);
 
+    // Save filmstrip to IndexedDB for timeline recovery
+    await idbSet('settings', `filmstrip_${projectId}`, result.filmstrip);
+
     let project = await idbGet<Project>('projects', projectId);
+    const coverThumb = result.filmstrip[0]?.url || null;
     if (!project) {
       project = {
         id: projectId,
@@ -859,7 +863,7 @@ export async function uploadVideoChunked(params: {
         updatedAt: new Date().toISOString(),
         sourceVideoUrl: result.sourceVideoUrl,
         sourceFilename: file.name,
-        thumbnailUrl: null,
+        thumbnailUrl: coverThumb,
         metadata: result.metadata,
         waveformPeaks: result.waveforms.orig,
         captions: [],
@@ -937,6 +941,7 @@ export async function uploadVideoChunked(params: {
     } else {
       project.sourceVideoUrl = result.sourceVideoUrl;
       project.sourceFilename = file.name;
+      project.thumbnailUrl = project.thumbnailUrl || coverThumb;
       project.metadata = result.metadata;
       project.waveformPeaks = result.waveforms.orig;
       project.updatedAt = new Date().toISOString();
@@ -944,6 +949,7 @@ export async function uploadVideoChunked(params: {
 
     await idbSet('projects', project.id, project);
     onProgress(100, 'Local browser processing complete');
+    console.log(`[BrowserVideoProcessor] Final import completion successfully recorded for project: ${project.id} (${project.name})`);
     return project;
   }
 }
