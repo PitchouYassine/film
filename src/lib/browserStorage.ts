@@ -1,5 +1,3 @@
-import { Project, StudioPreset, DefaultStudioPreferences, SavedFishVoice, SavedFontAsset, RenderJob } from '../types/studio';
-
 const DB_NAME = 'recap_studio_local_db';
 const DB_VERSION = 1;
 
@@ -25,6 +23,9 @@ export function openIndexedDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('jobs')) {
         db.createObjectStore('jobs', { keyPath: 'id' });
       }
+      if (!db.objectStoreNames.contains('filmstrips')) {
+        db.createObjectStore('filmstrips', { keyPath: 'id' });
+      }
     };
   });
 }
@@ -36,7 +37,14 @@ export async function idbGet<T>(storeName: string, key: string): Promise<T | und
     const store = tx.objectStore(storeName);
     const req = store.get(key);
     req.onerror = () => reject(req.error);
-    req.onsuccess = () => resolve(req.result?.value ?? req.result);
+    req.onsuccess = () => {
+      const res = req.result;
+      if (!res) return resolve(undefined);
+      if (typeof res === 'object' && res !== null && 'value' in res && Object.keys(res).length <= 3) {
+        return resolve(res.value as T);
+      }
+      return resolve(res as T);
+    };
   });
 }
 
@@ -45,7 +53,18 @@ export async function idbSet<T>(storeName: string, key: string, value: T): Promi
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
-    const req = store.put({ key, value });
+
+    // Provide both id and key so this record works on stores configured with keyPath 'id' or 'key'
+    let record: any;
+    if (value && typeof value === 'object' && !(value instanceof Blob)) {
+      record = { ...(value as any) };
+      if (!('id' in record)) record.id = key;
+      if (!('key' in record)) record.key = key;
+    } else {
+      record = { key, id: key, value };
+    }
+
+    const req = store.put(record);
     req.onerror = () => reject(req.error);
     req.onsuccess = () => resolve();
   });
@@ -71,8 +90,11 @@ export async function idbList<T>(storeName: string): Promise<T[]> {
     req.onerror = () => reject(req.error);
     req.onsuccess = () => {
       const results = req.result || [];
-      // If stored with { key, value } wrapper
-      resolve(results.map((r: any) => (r && typeof r === 'object' && 'value' in r ? r.value : r)));
+      resolve(
+        results.map((r: any) =>
+          r && typeof r === 'object' && 'value' in r && Object.keys(r).length <= 3 ? r.value : r
+        )
+      );
     };
   });
 }

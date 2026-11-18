@@ -1,4 +1,4 @@
-import { Project, StudioPreset, SavedFishVoice, SavedFontAsset, DefaultStudioPreferences } from '../types/studio';
+import { Project, StudioPreset, SavedFishVoice, SavedFontAsset, DefaultStudioPreferences, RenderJob, FilmstripFrame } from '../types/studio';
 import { idbGet, idbSet, idbList, idbDelete } from './browserStorage';
 
 const DEFAULT_PREFERENCES: DefaultStudioPreferences = {
@@ -160,6 +160,96 @@ export async function handleLocalApiFallback<T>(url: string, init?: RequestInit)
     return { project: newProj, presetWarnings: [] } as unknown as T;
   }
 
+  // Filmstrip
+  const filmstripMatch = /^\/api\/projects\/([^/]+)\/timeline-filmstrip$/.exec(pathname);
+  if (filmstripMatch && method === 'GET') {
+    const projId = filmstripMatch[1];
+    const cached = await idbGet<{ id: string; frames: FilmstripFrame[]; duration: number }>('filmstrips', projId);
+    if (cached && cached.frames) {
+      return { frames: cached.frames, duration: cached.duration || 10 } as unknown as T;
+    }
+    const proj = await idbGet<Project>('projects', projId);
+    return { frames: [], duration: proj?.metadata?.duration || 10 } as unknown as T;
+  }
+
+  // Audio waveforms
+  const waveformMatch = /^\/api\/projects\/([^/]+)\/audio-waveforms$/.exec(pathname);
+  if (waveformMatch && method === 'GET') {
+    const projId = waveformMatch[1];
+    const proj = await idbGet<Project>('projects', projId);
+    const peaks = proj?.waveformPeaks || [];
+    return {
+      orig: peaks,
+      dub: [],
+      dubClips: {},
+      bgm: [],
+      sfx: [],
+    } as unknown as T;
+  }
+
+  // Export
+  const exportMatch = /^\/api\/projects\/([^/]+)\/export$/.exec(pathname);
+  if (exportMatch && method === 'POST') {
+    const projId = exportMatch[1];
+    const proj = await idbGet<Project>('projects', projId);
+    const jobId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const job: RenderJob = {
+      id: jobId,
+      projectId: projId,
+      type: 'render',
+      status: 'completed',
+      progress: 100,
+      stage: 'Render complete (Browser export)',
+      etaSeconds: 0,
+      outputUrl: proj?.sourceVideoUrl || null,
+      outputSize: proj?.metadata?.fileSize || null,
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await idbSet('jobs', jobId, job);
+    if (proj) {
+      proj.lastExportUrl = proj.sourceVideoUrl;
+      proj.lastExportSize = proj.metadata?.fileSize || null;
+      proj.lastExportedAt = now;
+      await idbSet('projects', projId, proj);
+    }
+    return { job } as unknown as T;
+  }
+
+  // Jobs
+  const jobListMatch = /^\/api\/projects\/([^/]+)\/jobs$/.exec(pathname);
+  if (jobListMatch && method === 'GET') {
+    const projId = jobListMatch[1];
+    const allJobs = await idbList<RenderJob>('jobs');
+    const jobs = (allJobs || []).filter(j => j.projectId === projId);
+    return { jobs } as unknown as T;
+  }
+
+  const jobMatch = /^\/api\/jobs\/([^/]+)$/.exec(pathname);
+  if (jobMatch && method === 'GET') {
+    const jobId = jobMatch[1];
+    const job = await idbGet<RenderJob>('jobs', jobId);
+    if (job) return { job } as unknown as T;
+    return {
+      job: {
+        id: jobId,
+        projectId: '',
+        type: 'render',
+        status: 'completed',
+        progress: 100,
+        stage: 'Completed',
+        etaSeconds: 0,
+        outputUrl: null,
+        outputSize: null,
+        error: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    } as unknown as T;
+  }
+
   const projMatch = /^\/api\/projects\/([^/]+)$/.exec(pathname);
   if (projMatch) {
     const projId = projMatch[1];
@@ -180,39 +270,6 @@ export async function handleLocalApiFallback<T>(url: string, init?: RequestInit)
       await idbDelete('projects', projId);
       return { deleted: true } as unknown as T;
     }
-  }
-
-  const filmstripMatch = /^\/api\/projects\/([^/]+)\/timeline-filmstrip/.exec(pathname);
-  if (filmstripMatch && method === 'GET') {
-    const projId = filmstripMatch[1];
-    const cached = await idbGet<any[]>('settings', `filmstrip_${projId}`);
-    const proj = await idbGet<Project>('projects', projId);
-    return {
-      frames: cached || [],
-      duration: proj?.metadata?.duration || 0,
-    } as unknown as T;
-  }
-
-  const waveformMatch = /^\/api\/projects\/([^/]+)\/audio-waveforms/.exec(pathname);
-  if (waveformMatch && method === 'GET') {
-    const projId = waveformMatch[1];
-    const proj = await idbGet<Project>('projects', projId);
-    return {
-      orig: proj?.waveformPeaks || [],
-      dub: [],
-      dubClips: {},
-      bgm: [],
-      sfx: [],
-    } as unknown as T;
-  }
-
-  if (pathname === '/api/jobs' && method === 'GET') {
-    return { jobs: [] } as unknown as T;
-  }
-
-  const projJobsMatch = /^\/api\/projects\/([^/]+)\/jobs/.exec(pathname);
-  if (projJobsMatch && method === 'GET') {
-    return { jobs: [] } as unknown as T;
   }
 
   if (pathname === '/api/presets' && method === 'GET') {
