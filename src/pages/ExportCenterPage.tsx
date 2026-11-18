@@ -595,7 +595,7 @@ export function ExportCenterPage({
                 <p className="text-xs text-zinc-400">
                   {previewMode === 'rendered' && project.lastExportUrl
                     ? 'Verified MP4 output encoded locally by FFmpeg (H.264 / AAC) and playable across devices.'
-                    : 'Real-time workspace preview — click GENERATE FINAL VIDEO to encode locally.'}
+                    : 'Real-time workspace preview — click Export Final MP4 to encode locally.'}
                 </p>
               </div>
 
@@ -838,7 +838,7 @@ export function ExportCenterPage({
                         onError={() => {
                           setExportValidation('error');
                           setExportValidationMsg(
-                            'Browser could not decode the rendered MP4 stream. Please click GENERATE FINAL VIDEO to re-encode.'
+                            'Browser could not decode the rendered MP4 stream. Please click Export Final MP4 to re-encode.'
                           );
                         }}
                         className="w-full h-full object-contain bg-black"

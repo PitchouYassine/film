@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
+  HardDrive,
   KeyRound,
   Layers,
   Loader2,
@@ -33,10 +34,12 @@ import {
   SyncMode,
 } from '../types/studio';
 import { api } from '../lib/api';
+import { formatBytes } from '../lib/formatters';
 import { MyVoicesManager } from '../components/MyVoicesManager';
 import { MyStylesManager } from '../components/MyStylesManager';
+import { StudioCard, StudioSectionHeader } from '../components/ui/StudioPrimitives';
 
-export type SettingsTabId = 'api' | 'voices' | 'styles' | 'preferences';
+export type SettingsTabId = 'api' | 'preferences' | 'storage' | 'voices' | 'styles';
 
 interface SettingsPageProps {
   activeProject?: Project | null;
@@ -53,10 +56,11 @@ const TABS: Array<{
   label: string;
   Icon: React.ComponentType<{ className?: string }>;
 }> = [
-  { id: 'api', label: 'API & Integrations', Icon: KeyRound },
-  { id: 'voices', label: 'My Voices', Icon: Mic },
-  { id: 'styles', label: 'My Styles', Icon: Layers },
-  { id: 'preferences', label: 'Default Preferences', Icon: SlidersHorizontal },
+  { id: 'api', label: 'API & Engines', Icon: KeyRound },
+  { id: 'preferences', label: 'Studio Defaults', Icon: SlidersHorizontal },
+  { id: 'storage', label: 'Storage & Backups', Icon: HardDrive },
+  { id: 'voices', label: 'Saved Voices', Icon: Mic },
+  { id: 'styles', label: 'Saved Styles', Icon: Layers },
 ];
 
 export function SettingsPage({
@@ -76,6 +80,10 @@ export function SettingsPage({
 
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [fishSettings, setFishSettings] = useState<FishAudioSettingsSummary | null>(null);
+  const [storageUsage, setStorageUsage] = useState<{
+    totalBytes: number;
+    buckets: Record<string, { bytes: number; files: number }>;
+  } | null>(null);
 
   // Fish Audio API key state
   const [apiKeyInput, setApiKeyInput] = useState('');
@@ -100,11 +108,12 @@ export function SettingsPage({
   const [cleanupMsg, setCleanupMsg] = useState<string | null>(null);
 
   const refreshSettingsData = useCallback(async () => {
-    const [sysRes, fishRes, prefRes, stylesRes] = await Promise.all([
+    const [sysRes, fishRes, prefRes, stylesRes, storRes] = await Promise.all([
       api.getSystemStatus().catch(() => null),
       api.getFishAudioSettings().catch(() => null),
       api.getDefaultPreferences().catch(() => null),
       api.listStyles().catch(() => null),
+      api.getLocalStorageUsage().catch(() => null),
     ]);
     if (sysRes) setStatus(sysRes);
     if (fishRes) {
@@ -115,6 +124,7 @@ export function SettingsPage({
     }
     if (prefRes?.preferences) setPrefs(prefRes.preferences);
     if (stylesRes?.styles) setStyles(stylesRes.styles);
+    if (storRes) setStorageUsage(storRes);
   }, []);
 
   useEffect(() => {
@@ -223,6 +233,8 @@ export function SettingsPage({
     try {
       const res = await api.runCleanup();
       setCleanupMsg(`Cleanup complete: ${res.removedFiles} expired temporary items removed.`);
+      const storRes = await api.getLocalStorageUsage().catch(() => null);
+      if (storRes) setStorageUsage(storRes);
     } catch (err) {
       setCleanupMsg(err instanceof Error ? err.message : String(err));
     } finally {
@@ -247,7 +259,7 @@ export function SettingsPage({
             Settings
           </h1>
           <p className="text-xs sm:text-sm text-zinc-400 mt-0.5">
-            Manage Fish Audio credentials, custom narrators, saved styles, and studio defaults.
+            Configure API integrations, workflow defaults, local storage, saved voices, and style presets.
           </p>
         </div>
       </div>
@@ -280,10 +292,10 @@ export function SettingsPage({
         })}
       </div>
 
-      {/* TAB 1: API & INTEGRATIONS */}
+      {/* TAB 1: API & ENGINES */}
       {activeTab === 'api' && (
         <div className="space-y-5">
-          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] space-y-4">
+          <StudioCard padding="lg" className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <KeyRound className="w-4 h-4 text-violet-400 shrink-0" />
@@ -449,174 +461,10 @@ export function SettingsPage({
                 <span>{fishNotice ? fishNotice.text : fishSettings?.lastError}</span>
               </div>
             )}
-          </section>
-
-          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] space-y-1.5">
-            <div className="flex items-center gap-2 text-sm font-display font-semibold text-white">
-              <ShieldAlert className="w-4 h-4 text-amber-400" />
-              Media Rights
-            </div>
-            <p className="text-xs text-zinc-400 leading-relaxed">
-              Use Recap Studio AI only with media you own or have permission to edit.
-            </p>
-          </section>
-        </div>
-      )}
-
-      {/* TAB 2: MY VOICES */}
-      {activeTab === 'voices' && (
-        <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08]">
-          <MyVoicesManager
-            activeProject={activeProject}
-            onProjectUpdated={onProjectUpdated}
-            onNotice={onNotice}
-          />
-        </section>
-      )}
-
-      {/* TAB 3: MY STYLES */}
-      {activeTab === 'styles' && (
-        <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08]">
-          <MyStylesManager
-            activeProject={activeProject}
-            onProjectUpdated={onProjectUpdated}
-            onOpenSaveStyleDialog={onOpenSaveStyleDialog}
-            onStylesChanged={() => {
-              void api.listStyles().then((r) => setStyles(r.styles)).catch(() => {});
-              void api.getDefaultPreferences().then((r) => setPrefs(r.preferences)).catch(() => {});
-            }}
-            onNotice={onNotice}
-          />
-        </section>
-      )}
-
-      {/* TAB 4: DEFAULT PREFERENCES */}
-      {activeTab === 'preferences' && (
-        <div className="space-y-5">
-          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] space-y-4">
-            <div>
-              <h2 className="text-sm font-display font-semibold text-white">
-                Studio Workflow Defaults
-              </h2>
-              <p className="text-xs text-zinc-400 mt-0.5">
-                Configure optional style auto-apply and default translation / dubbing settings for new projects.
-              </p>
-            </div>
-
-            {prefs ? (
-              <div className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label
-                      htmlFor="pref-default-style"
-                      className="block text-xs font-medium text-zinc-300 mb-1.5"
-                    >
-                      Default Saved Style
-                    </label>
-                    <select
-                      id="pref-default-style"
-                      value={prefs.defaultStyleId || ''}
-                      disabled={savingPrefs}
-                      onChange={(e) =>
-                        void handleUpdatePreferences({
-                          defaultStyleId: e.target.value || null,
-                        })
-                      }
-                      className="w-full min-h-[38px] bg-[#18181D] border border-white/[0.1] rounded-lg px-3 py-1.5 text-xs text-white"
-                    >
-                      <option value="">None (No Default Style)</option>
-                      {styles.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label
-                      htmlFor="pref-target-lang"
-                      className="block text-xs font-medium text-zinc-300 mb-1.5"
-                    >
-                      Default Dub Target Language
-                    </label>
-                    <select
-                      id="pref-target-lang"
-                      value={prefs.defaultTargetLanguage}
-                      disabled={savingPrefs}
-                      onChange={(e) =>
-                        void handleUpdatePreferences({
-                          defaultTargetLanguage: e.target.value as SupportedLanguage,
-                        })
-                      }
-                      className="w-full min-h-[38px] bg-[#18181D] border border-white/[0.1] rounded-lg px-3 py-1.5 text-xs text-white"
-                    >
-                      {SUPPORTED_LANGUAGES.map((l) => (
-                        <option key={l} value={l}>
-                          {l}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label
-                      htmlFor="pref-sync-mode"
-                      className="block text-xs font-medium text-zinc-300 mb-1.5"
-                    >
-                      Default Timeline Sync Mode
-                    </label>
-                    <select
-                      id="pref-sync-mode"
-                      value={prefs.defaultSyncMode}
-                      disabled={savingPrefs}
-                      onChange={(e) =>
-                        void handleUpdatePreferences({
-                          defaultSyncMode: e.target.value as SyncMode,
-                        })
-                      }
-                      className="w-full min-h-[38px] bg-[#18181D] border border-white/[0.1] rounded-lg px-3 py-1.5 text-xs text-white"
-                    >
-                      <option value="flexible">Flexible (Auto-fit slots)</option>
-                      <option value="continuous">Continuous (Sequential narration)</option>
-                      <option value="match_original">Match Original Timestamps</option>
-                    </select>
-                  </div>
-
-                  <div className="flex items-end">
-                    <label className="w-full min-h-[38px] px-3 py-2 rounded-lg bg-[#18181D] border border-white/[0.08] flex items-center justify-between gap-3 text-xs text-zinc-200 cursor-pointer">
-                      <span>Auto-apply Default Style on video import</span>
-                      <input
-                        type="checkbox"
-                        checked={prefs.autoApplyDefaultStyleOnImport}
-                        disabled={savingPrefs}
-                        onChange={(e) =>
-                          void handleUpdatePreferences({
-                            autoApplyDefaultStyleOnImport: e.target.checked,
-                          })
-                        }
-                        className="accent-violet-500"
-                      />
-                    </label>
-                  </div>
-                </div>
-
-                {prefsMsg && (
-                  <div className="text-xs text-emerald-400 flex items-center gap-1.5">
-                    <Check className="w-3.5 h-3.5" />
-                    <span>{prefsMsg}</span>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="text-xs text-zinc-400 flex items-center gap-2">
-                <Loader2 className="w-4 h-4 animate-spin" /> Loading preferences...
-              </div>
-            )}
-          </section>
+          </StudioCard>
 
           {/* Engine & Service Status */}
-          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] space-y-4">
+          <StudioCard padding="lg" className="space-y-4">
             <h2 className="text-sm font-display font-semibold text-white">
               Engine &amp; Service Status
             </h2>
@@ -701,16 +549,154 @@ export function SettingsPage({
                 </div>
               </div>
             )}
-          </section>
+          </StudioCard>
 
-          {/* Storage & Temporary File Cleanup */}
-          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] space-y-3">
+          <StudioCard padding="lg" className="space-y-1.5">
+            <div className="flex items-center gap-2 text-sm font-display font-semibold text-white">
+              <ShieldAlert className="w-4 h-4 text-amber-400" />
+              Media Rights
+            </div>
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              Use Recap Studio AI only with media you own or have permission to edit.
+            </p>
+          </StudioCard>
+        </div>
+      )}
+
+      {/* TAB 2: STUDIO DEFAULTS */}
+      {activeTab === 'preferences' && (
+        <StudioCard padding="lg" className="space-y-4">
+          <StudioSectionHeader
+            title="Studio Workflow Defaults"
+            subtitle="Configure optional style auto-apply and default translation / dubbing settings for new projects."
+          />
+
+          {prefs ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label
+                    htmlFor="pref-default-style"
+                    className="block text-xs font-medium text-zinc-300 mb-1.5"
+                  >
+                    Default Saved Style
+                  </label>
+                  <select
+                    id="pref-default-style"
+                    value={prefs.defaultStyleId || ''}
+                    disabled={savingPrefs}
+                    onChange={(e) =>
+                      void handleUpdatePreferences({
+                        defaultStyleId: e.target.value || null,
+                      })
+                    }
+                    className="w-full min-h-[38px] bg-[#18181D] border border-white/[0.1] rounded-lg px-3 py-1.5 text-xs text-white"
+                  >
+                    <option value="">None (No Default Style)</option>
+                    {styles.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="pref-target-lang"
+                    className="block text-xs font-medium text-zinc-300 mb-1.5"
+                  >
+                    Default Dub Target Language
+                  </label>
+                  <select
+                    id="pref-target-lang"
+                    value={prefs.defaultTargetLanguage}
+                    disabled={savingPrefs}
+                    onChange={(e) =>
+                      void handleUpdatePreferences({
+                        defaultTargetLanguage: e.target.value as SupportedLanguage,
+                      })
+                    }
+                    className="w-full min-h-[38px] bg-[#18181D] border border-white/[0.1] rounded-lg px-3 py-1.5 text-xs text-white"
+                  >
+                    {SUPPORTED_LANGUAGES.map((l) => (
+                      <option key={l} value={l}>
+                        {l}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="pref-sync-mode"
+                    className="block text-xs font-medium text-zinc-300 mb-1.5"
+                  >
+                    Default Timeline Sync Mode
+                  </label>
+                  <select
+                    id="pref-sync-mode"
+                    value={prefs.defaultSyncMode}
+                    disabled={savingPrefs}
+                    onChange={(e) =>
+                      void handleUpdatePreferences({
+                        defaultSyncMode: e.target.value as SyncMode,
+                      })
+                    }
+                    className="w-full min-h-[38px] bg-[#18181D] border border-white/[0.1] rounded-lg px-3 py-1.5 text-xs text-white"
+                  >
+                    <option value="flexible">Flexible (Auto-fit slots)</option>
+                    <option value="continuous">Continuous (Sequential narration)</option>
+                    <option value="match_original">Match Original Timestamps</option>
+                  </select>
+                </div>
+
+                <div className="flex items-end">
+                  <label className="w-full min-h-[38px] px-3 py-2 rounded-lg bg-[#18181D] border border-white/[0.08] flex items-center justify-between gap-3 text-xs text-zinc-200 cursor-pointer">
+                    <span>Auto-apply Default Style on video import</span>
+                    <input
+                      type="checkbox"
+                      checked={prefs.autoApplyDefaultStyleOnImport}
+                      disabled={savingPrefs}
+                      onChange={(e) =>
+                        void handleUpdatePreferences({
+                          autoApplyDefaultStyleOnImport: e.target.checked,
+                        })
+                      }
+                      className="accent-violet-500"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              {prefsMsg && (
+                <div className="text-xs text-emerald-400 flex items-center gap-1.5">
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{prefsMsg}</span>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-xs text-zinc-400 flex items-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading preferences...
+            </div>
+          )}
+        </StudioCard>
+      )}
+
+      {/* TAB 3: STORAGE & BACKUPS */}
+      {activeTab === 'storage' && (
+        <div className="space-y-5">
+          <StudioCard padding="lg" className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-sm font-display font-semibold text-white">
-                  Storage &amp; Cleanup
+                  Storage Usage &amp; Temporary Cleanup
                 </h2>
                 <p className="text-xs text-zinc-400 mt-0.5 tabular-nums">
+                  {storageUsage
+                    ? `Total local disk used: ${formatBytes(storageUsage.totalBytes)} · `
+                    : ''}
                   Max upload: {status?.maxUploadSizeMb ?? 2048} MB · Retention:{' '}
                   {status?.tempRetentionHours ?? 24}h
                 </p>
@@ -730,17 +716,35 @@ export function SettingsPage({
               </button>
             </div>
 
-            {cleanupMsg && <div className="text-xs text-emerald-400">{cleanupMsg}</div>}
-          </section>
+            {storageUsage && Object.keys(storageUsage.buckets).length > 0 && (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5 text-xs">
+                {Object.entries(storageUsage.buckets).map(([bucket, info]) => (
+                  <div
+                    key={bucket}
+                    className="p-2.5 rounded-lg bg-[#16161D] border border-white/[0.07]"
+                  >
+                    <div className="text-[11px] text-zinc-400 capitalize truncate">{bucket}</div>
+                    <div className="font-mono font-semibold text-white tabular-nums mt-0.5">
+                      {formatBytes(info.bytes)}
+                    </div>
+                    <div className="text-[10.5px] text-zinc-500 tabular-nums">
+                      {info.files} files
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
 
-          {/* Portable Backup Studio */}
-          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] flex flex-wrap items-center justify-between gap-3">
+            {cleanupMsg && <div className="text-xs text-emerald-400">{cleanupMsg}</div>}
+          </StudioCard>
+
+          <StudioCard padding="lg" className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-sm font-display font-semibold text-white">
-                Local Storage &amp; Backups
+                Portable Backups &amp; Cloud Sync
               </h2>
               <p className="text-xs text-zinc-400 mt-0.5">
-                Export or restore complete project archives.
+                Export or restore complete project archives, offline IndexedDB cache, or connect cloud sync.
               </p>
             </div>
             {onOpenBackupModal && (
@@ -753,8 +757,35 @@ export function SettingsPage({
                 <span>Manage Backups</span>
               </button>
             )}
-          </section>
+          </StudioCard>
         </div>
+      )}
+
+      {/* TAB 4: SAVED VOICES */}
+      {activeTab === 'voices' && (
+        <StudioCard padding="lg">
+          <MyVoicesManager
+            activeProject={activeProject}
+            onProjectUpdated={onProjectUpdated}
+            onNotice={onNotice}
+          />
+        </StudioCard>
+      )}
+
+      {/* TAB 5: SAVED STYLES */}
+      {activeTab === 'styles' && (
+        <StudioCard padding="lg">
+          <MyStylesManager
+            activeProject={activeProject}
+            onProjectUpdated={onProjectUpdated}
+            onOpenSaveStyleDialog={onOpenSaveStyleDialog}
+            onStylesChanged={() => {
+              void api.listStyles().then((r) => setStyles(r.styles)).catch(() => {});
+              void api.getDefaultPreferences().then((r) => setPrefs(r.preferences)).catch(() => {});
+            }}
+            onNotice={onNotice}
+          />
+        </StudioCard>
       )}
     </div>
   );

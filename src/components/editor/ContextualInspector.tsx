@@ -13,6 +13,7 @@ import {
   FlipHorizontal2,
   FlipVertical2,
   Layers,
+  Layers3,
   Lock,
   MoreHorizontal,
   Move,
@@ -71,6 +72,19 @@ export interface ContextualActionButton {
   onClick: () => void;
 }
 
+export const INSPECTOR_TOOL_LABELS: Record<StudioToolId, { title: string; category: string }> = {
+  edit: { title: 'Clip, Transform & Media', category: 'Media & Transform' },
+  audio: { title: 'Audio Mixer & AI Voice', category: 'Audio' },
+  captions: { title: 'Captions & Subtitles', category: 'Text' },
+  text: { title: 'Text Overlays', category: 'Text' },
+  overlay: { title: 'Logos, Watermarks & Motion', category: 'Visual' },
+  blur: { title: 'Blur & Motion Tracking', category: 'Visual' },
+  filters: { title: 'Color Filters', category: 'Visual' },
+  effects: { title: 'Visual Effects', category: 'Visual' },
+  adjust: { title: 'Color Adjustments', category: 'Visual' },
+  layers: { title: 'Project Layers Stack', category: 'Layers' },
+};
+
 export const INSPECTOR_TOOL_TABS: Array<{
   id: StudioToolId;
   label: string;
@@ -85,7 +99,7 @@ export const INSPECTOR_TOOL_TABS: Array<{
   { id: 'filters', label: 'Filters', Icon: Wand2 },
   { id: 'effects', label: 'Effects', Icon: Sparkles },
   { id: 'adjust', label: 'Adjust', Icon: Sliders },
-  { id: 'layers', label: 'Layers', Icon: Layers },
+  { id: 'layers', label: 'Layers', Icon: Layers3 },
 ];
 
 interface ContextualInspectorProps {
@@ -1139,26 +1153,30 @@ export function ContextualInspector({
           </div>
         </div>
 
-        {/* Clean Category Switcher */}
-        <div className="flex items-center gap-1 overflow-x-auto no-scrollbar pb-0.5">
-          {INSPECTOR_TOOL_TABS.map(({ id, label, Icon }) => {
-            const isActive = activeTool === id;
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => onSelectTool(id)}
-                className={`min-h-[30px] px-2 py-1 rounded-md text-[11px] font-medium flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
-                  isActive
-                    ? 'bg-violet-600 text-white'
-                    : 'bg-[#181822] text-zinc-300 hover:text-white hover:bg-[#22222E]'
-                }`}
-              >
-                <Icon className="w-3 h-3 shrink-0" />
-                <span>{label}</span>
-              </button>
-            );
-          })}
+        {/* Active Tool Header + Quick Layers Switcher (Desktop relies on Left ToolCategoryRail) */}
+        <div className="flex items-center justify-between gap-2 pb-1">
+          <div className="min-w-0">
+            <div className="text-xs font-display font-semibold text-white truncate">
+              {INSPECTOR_TOOL_LABELS[activeTool].title}
+            </div>
+            <div className="text-[10.5px] text-zinc-500">
+              {INSPECTOR_TOOL_LABELS[activeTool].category}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onSelectTool(activeTool === 'layers' ? 'edit' : 'layers')}
+            className={`min-h-[28px] px-2 py-1 rounded-md border text-[11px] font-medium flex items-center gap-1 shrink-0 cursor-pointer transition-colors ${
+              activeTool === 'layers'
+                ? 'bg-violet-600 text-white border-violet-500'
+                : 'bg-[#181822] border-white/[0.08] text-zinc-300 hover:text-white'
+            }`}
+            title="Toggle Layers Stack"
+          >
+            <Layers3 className="w-3.5 h-3.5" />
+            <span>Layers</span>
+          </button>
         </div>
 
         {/* Strict Contextual Quick Actions Row */}

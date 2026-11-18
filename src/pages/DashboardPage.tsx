@@ -640,7 +640,7 @@ export function DashboardPage({
                   onClick={() =>
                     onSelectProject(
                       p,
-                      !p.sourceVideoUrl ? 'dashboard' : p.captions.length === 0 ? 'translator' : 'editor'
+                      !p.sourceVideoUrl ? 'dashboard' : undefined
                     )
                   }
                   className={`group rounded-xl bg-[#111115] border transition-colors overflow-hidden cursor-pointer flex flex-col ${

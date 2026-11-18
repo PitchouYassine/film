@@ -21,46 +21,46 @@ export interface WorkflowStageDef {
 
 export const WORKFLOW_STAGES: WorkflowStageDef[] = [
   {
-    id: 'dashboard',
+    id: 'translator',
     stepLabel: '1',
-    title: 'Import Video',
+    title: 'Translation Studio',
+    shortTitle: 'Translation',
+    optional: false,
+  },
+  {
+    id: 'voice',
+    stepLabel: '2',
+    title: 'Voice Studio',
+    shortTitle: 'Voice',
+    optional: false,
+  },
+  {
+    id: 'editor',
+    stepLabel: '3',
+    title: 'Video Editor',
+    shortTitle: 'Editor',
+    optional: false,
+  },
+  {
+    id: 'export',
+    stepLabel: '4',
+    title: 'Export',
+    shortTitle: 'Export',
+    optional: false,
+  },
+  {
+    id: 'dashboard',
+    stepLabel: '0',
+    title: 'Projects & Import',
     shortTitle: 'Import',
     optional: false,
   },
   {
-    id: 'translator',
-    stepLabel: '2',
-    title: 'Analysis & Translation',
-    shortTitle: 'Translation',
-    optional: true,
-  },
-  {
-    id: 'voice',
-    stepLabel: '3–4',
-    title: 'Voiceover & Sync',
-    shortTitle: 'Voice & Sync',
-    optional: true,
-  },
-  {
-    id: 'editor',
-    stepLabel: '5',
-    title: 'Editing & Filters',
-    shortTitle: 'Edit & Canvas',
-    optional: true,
-  },
-  {
     id: 'captions',
-    stepLabel: '6',
-    title: 'Captions (Manual)',
+    stepLabel: '3B',
+    title: 'Captions (Editor)',
     shortTitle: 'Captions',
     optional: true,
-  },
-  {
-    id: 'export',
-    stepLabel: '7',
-    title: 'Final Preview & Export',
-    shortTitle: 'Export',
-    optional: false,
   },
 ];
 
@@ -920,7 +920,7 @@ export function resolveCanvasDimensions(
   return { width, height };
 }
 
-export type PipelineStepId = 'import' | 'prepare' | 'validate' | 'editor' | 'export';
+export type PipelineStepId = 'translator' | 'voice' | 'editor' | 'export';
 
 export interface EditorValidationResult {
   valid: boolean;
@@ -1085,36 +1085,27 @@ export function getPipelineSteps(
 
   return [
     {
-      id: 'import',
+      id: 'translator',
       number: '1',
-      label: 'Import Video',
-      shortLabel: 'Import',
-      completed: hasVideo,
-      active: activeStep === 'import',
-      accessible: true,
-    },
-    {
-      id: 'prepare',
-      number: '2',
-      label: 'Translation & Audio',
-      shortLabel: 'Translate & Audio',
-      completed: validation.translationValid && validation.audioCompleted,
-      active: activeStep === 'prepare',
+      label: 'Translation Studio',
+      shortLabel: 'Translate',
+      completed: validation.translationValid,
+      active: activeStep === 'translator',
       accessible: hasVideo,
     },
     {
-      id: 'validate',
-      number: '3',
-      label: 'Validate',
-      shortLabel: 'Validate',
+      id: 'voice',
+      number: '2',
+      label: 'Voice Studio',
+      shortLabel: 'Voice',
       completed: isValidated,
-      active: activeStep === 'validate',
+      active: activeStep === 'voice',
       accessible: hasVideo,
     },
     {
       id: 'editor',
-      number: '4',
-      label: 'Editor',
+      number: '3',
+      label: 'Video Editor',
       shortLabel: 'Editor',
       completed: Boolean(project?.workflow?.completedStages?.includes('editor')) || hasExport,
       active: activeStep === 'editor',
@@ -1122,7 +1113,7 @@ export function getPipelineSteps(
     },
     {
       id: 'export',
-      number: '5',
+      number: '4',
       label: 'Export',
       shortLabel: 'Export',
       completed: hasExport,

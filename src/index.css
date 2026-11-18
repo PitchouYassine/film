@@ -5,12 +5,25 @@
     --font-display: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
     --font-sans: 'DM Sans', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+    --studio-bg: #09090b;
+    --studio-surface: #101015;
+    --studio-elevated: #17171f;
+    --studio-border: rgba(255, 255, 255, 0.08);
+    --studio-accent: #7c3aed;
   }
 
   html {
     font-family: var(--font-sans);
-    background-color: #09090b;
+    background-color: var(--studio-bg);
     color: #f4f4f5;
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--studio-bg);
+    color: #f4f4f5;
+    overflow-x: hidden;
   }
 
   h1, h2, h3, h4, .font-display {
@@ -21,9 +34,18 @@
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 2px solid rgba(139, 92, 246, 0.85);
+    outline-offset: 2px;
+  }
 }
 
-/* Subtle studio scrollbars */
+/* Unified Studio Scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -34,14 +56,15 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.13);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(139, 92, 246, 0.45);
+  background: rgba(139, 92, 246, 0.5);
 }
 
+/* Caption Animation Keyframes */
 @keyframes captionPop {
   0% { transform: scale(0.72); opacity: 0.7; }
   65% { transform: scale(1.14); opacity: 1; }
@@ -89,4 +112,12 @@
 
 .pb-safe {
   padding-bottom: max(0.35rem, env(safe-area-inset-bottom));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

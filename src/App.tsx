@@ -114,6 +114,7 @@ import { StudioBottomSheet } from './components/ui/StudioBottomSheet';
 import { DEFAULT_TOOL_MEMORY, StudioToolMemory } from './components/sheets/toolMemory';
 import { ContextualInspector } from './components/editor/ContextualInspector';
 import { DashboardPage } from './pages/DashboardPage';
+import { TranslatorPage } from './pages/TranslatorPage';
 import { VoiceStudioPage } from './pages/VoiceStudioPage';
 import { ExportCenterPage } from './pages/ExportCenterPage';
 import { SettingsPage, SettingsTabId } from './pages/SettingsPage';
@@ -221,8 +222,9 @@ export default function App() {
   const activeUndoGroupRef = useRef<{ key: string; timerId: number } | null>(null);
 
   // Top-level Shell Views & Modals
-  const [activeView, setActiveView] = useState<'projects' | 'prepare' | 'editor' | 'export' | 'settings'>('projects');
-  const [settingsReturnView, setSettingsReturnView] = useState<'projects' | 'prepare' | 'editor' | 'export'>('projects');
+  const [activeView, setActiveView] = useState<'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'settings'>('projects');
+  const [settingsReturnView, setSettingsReturnView] = useState<'projects' | 'translator' | 'voice' | 'editor' | 'export'>('projects');
+  const [focusTranslationOverflowSignal, setFocusTranslationOverflowSignal] = useState(0);
   const [cloudModalOpen, setCloudModalOpen] = useState(false);
   const [saveStyleModalOpen, setSaveStyleModalOpen] = useState(false);
   const [myStylesModalOpen, setMyStylesModalOpen] = useState(false);
@@ -839,9 +841,15 @@ export default function App() {
         return;
       }
 
-      if (navigateTo === 'translator' || navigateTo === 'voice') {
+      if (navigateTo === 'translator') {
         setActiveTool(null);
-        setActiveView('prepare');
+        setActiveView('translator');
+        return;
+      }
+
+      if (navigateTo === 'voice') {
+        setActiveTool(null);
+        setActiveView('voice');
         return;
       }
 
@@ -864,7 +872,7 @@ export default function App() {
         return;
       }
 
-      // Default routing: newly imported or unvalidated projects go to Translation & Voice Generation first
+      // Default routing: Step 1 (Translation Studio) -> Step 2 (Voice Studio) -> Step 3 (Video Editor)
       const ready = validateProjectReadyForEditor(project);
       const alreadyValidated =
         ready.valid &&
@@ -874,8 +882,11 @@ export default function App() {
       if (alreadyValidated || project.workflow?.completedStages?.includes('editor')) {
         setActiveView('editor');
         setActiveTool(null);
+      } else if (ready.translationValid) {
+        setActiveView('voice');
+        setActiveTool(null);
       } else {
-        setActiveView('prepare');
+        setActiveView('translator');
         setActiveTool(null);
       }
     },
@@ -3248,10 +3259,10 @@ export default function App() {
   const activeToolMeta = activeTool ? TOOL_DOCK_ITEMS.find((t) => t.id === activeTool) : null;
 
   const currentPipelineStep: PipelineStepId =
-    activeView === 'projects'
-      ? 'import'
-      : activeView === 'prepare'
-      ? 'prepare'
+    activeView === 'translator'
+      ? 'translator'
+      : activeView === 'voice'
+      ? 'voice'
       : activeView === 'export'
       ? 'export'
       : 'editor';
@@ -3265,15 +3276,15 @@ export default function App() {
     (step: PipelineStepId) => {
       videoRef.current?.pause();
       setMoreMenuOpen(false);
-      if (step === 'import') {
+      if (!activeProject) return;
+      if (step === 'translator') {
         setActiveTool(null);
-        setActiveView('projects');
+        setActiveView('translator');
         return;
       }
-      if (!activeProject) return;
-      if (step === 'prepare' || step === 'validate') {
+      if (step === 'voice') {
         setActiveTool(null);
-        setActiveView('prepare');
+        setActiveView('voice');
         return;
       }
       if (step === 'editor') {
@@ -3283,10 +3294,11 @@ export default function App() {
           Boolean(activeProject.voice?.enabled) &&
           Boolean(activeProject.workflow?.completedStages?.includes('voice'));
         if (!isValidated) {
-          setActiveView('prepare');
+          setActiveTool(null);
+          setActiveView(check.translationValid ? 'voice' : 'translator');
           showNotice(
             check.errors[0] ||
-              'Complete Translation & Voice Generation and click VALIDATE & CONTINUE TO EDIT first.'
+              'Complete Translation & Voice Studio and click VALIDATE & CONTINUE TO VIDEO EDITOR first.'
           );
           return;
         }
@@ -3322,7 +3334,9 @@ export default function App() {
                 } else if (activeView === 'export') {
                   setActiveView('editor');
                 } else if (activeView === 'editor') {
-                  setActiveView('prepare');
+                  setActiveView('voice');
+                } else if (activeView === 'voice') {
+                  setActiveView('translator');
                 } else {
                   setActiveView('projects');
                 }
@@ -3333,9 +3347,11 @@ export default function App() {
                 activeView === 'settings'
                   ? 'Back'
                   : activeView === 'export'
-                  ? 'Back to Editor'
+                  ? 'Back to Video Editor'
                   : activeView === 'editor'
-                  ? 'Back to Translation & Audio'
+                  ? 'Back to Voice Studio'
+                  : activeView === 'voice'
+                  ? 'Back to Translation Studio'
                   : 'Back to Projects'
               }
             >
@@ -3590,17 +3606,26 @@ export default function App() {
             pendingSyncProjectIds={new Set(pendingOps.map((p) => p.projectId))}
           />
         </main>
-      ) : activeView === 'prepare' ? (
+      ) : activeView === 'translator' ? (
+        <main className="flex-1 min-h-0 overflow-y-auto">
+          <TranslatorPage
+            project={activeProject}
+            onProjectUpdated={handleProjectUpdated}
+            focusAudioOverflowSignal={focusTranslationOverflowSignal}
+            onContinueToVoice={(updatedProject) => {
+              handleProjectUpdated(updatedProject);
+              setActiveView('voice');
+            }}
+          />
+        </main>
+      ) : activeView === 'voice' ? (
         <main className="flex-1 min-h-0 overflow-y-auto">
           <VoiceStudioPage
             project={activeProject}
             onProjectUpdated={handleProjectUpdated}
-            videoRef={videoRef}
-            currentTime={currentTime}
-            onTimeUpdate={setCurrentTime}
-            onSeek={handleSeek}
-            previewEffects={previewEffects}
-            onTogglePreviewEffects={setPreviewEffects}
+            onRequestTranslationShorten={() =>
+              setFocusTranslationOverflowSignal((n) => n + 1)
+            }
             onNavigate={(page) => {
               if (page === 'settings') {
                 openSettingsPage();

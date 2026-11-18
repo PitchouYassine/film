@@ -1,13 +1,27 @@
 export type NavPage =
   | 'dashboard'
+  | 'projects'
   | 'editor'
   | 'captions'
+  | 'effects'
   | 'translator'
   | 'voice'
   | 'blur'
   | 'branding'
+  | 'media'
+  | 'styles'
+  | 'voices'
   | 'export'
   | 'settings';
+
+export type EditorToolCategoryId =
+  | 'media'
+  | 'transform'
+  | 'visual'
+  | 'text'
+  | 'animation'
+  | 'audio'
+  | 'export';
 
 export type StudioToolId =
   | 'edit'

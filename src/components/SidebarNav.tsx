@@ -32,12 +32,11 @@ interface NavItemDef {
 }
 
 const STAGE_NAV_ITEMS: NavItemDef[] = [
-  { id: 'dashboard', label: 'Import Video', stageBadge: '1', icon: LayoutDashboard },
-  { id: 'translator', label: 'Analysis & Translation', stageBadge: '2', icon: Languages },
-  { id: 'voice', label: 'Voiceover & Sync', stageBadge: '3–4', icon: Mic },
-  { id: 'editor', label: 'Editing & Filters', stageBadge: '5', icon: Film },
-  { id: 'captions', label: 'Captions (Manual)', stageBadge: '6', icon: Captions },
-  { id: 'export', label: 'Final Preview & Export', stageBadge: '7', icon: Download },
+  { id: 'translator', label: 'Translation Studio', stageBadge: '1', icon: Languages },
+  { id: 'voice', label: 'Voice Studio', stageBadge: '2', icon: Mic },
+  { id: 'editor', label: 'Video Editor', stageBadge: '3', icon: Film },
+  { id: 'export', label: 'Export', stageBadge: '4', icon: Download },
+  { id: 'dashboard', label: 'Projects & Import', stageBadge: '•', icon: LayoutDashboard },
 ];
 
 export function SidebarNav({
