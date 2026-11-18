@@ -511,13 +511,18 @@ export function SettingsPage({
                 <div className="py-3 flex items-center justify-between gap-4">
                   <div>
                     <div className="font-medium text-zinc-100">FFmpeg Renderer</div>
-                    <div className="text-zinc-500 mt-0.5 font-mono">v{status.ffmpegVersion}</div>
+                    <div className="text-zinc-500 mt-0.5 font-mono">{status.ffmpegVersion}</div>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0 font-medium">
                     {status.ffmpegAvailable ? (
                       <>
                         <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                         <span className="text-emerald-300">Ready</span>
+                      </>
+                    ) : status.clientProcessingAvailable ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                        <span className="text-emerald-300">Browser WASM Ready</span>
                       </>
                     ) : (
                       <>
@@ -538,6 +543,11 @@ export function SettingsPage({
                       <>
                         <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                         <span className="text-emerald-300">Ready</span>
+                      </>
+                    ) : status.clientProcessingAvailable ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                        <span className="text-emerald-300">Browser Media Ready</span>
                       </>
                     ) : (
                       <>
