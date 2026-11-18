@@ -1,0 +1,761 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  AlertCircle,
+  Archive,
+  Check,
+  CheckCircle2,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Layers,
+  Loader2,
+  Mic,
+  PlugZap,
+  RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
+  SlidersHorizontal,
+  Trash2,
+} from 'lucide-react';
+import {
+  DefaultStudioPreferences,
+  FishAudioSettingsSummary,
+  Project,
+  SUPPORTED_LANGUAGES,
+  StudioPreset,
+  SupportedLanguage,
+  SystemStatus,
+  SyncMode,
+} from '../types/studio';
+import { api } from '../lib/api';
+import { MyVoicesManager } from '../components/MyVoicesManager';
+import { MyStylesManager } from '../components/MyStylesManager';
+
+export type SettingsTabId = 'api' | 'voices' | 'styles' | 'preferences';
+
+interface SettingsPageProps {
+  activeProject?: Project | null;
+  onProjectUpdated?: (p: Project) => void;
+  onOpenBackupModal?: () => void;
+  onSettingsUpdated?: () => void;
+  initialTab?: SettingsTabId;
+  onOpenSaveStyleDialog?: () => void;
+  onNotice?: (msg: string) => void;
+}
+
+const TABS: Array<{
+  id: SettingsTabId;
+  label: string;
+  Icon: React.ComponentType<{ className?: string }>;
+}> = [
+  { id: 'api', label: 'API & Integrations', Icon: KeyRound },
+  { id: 'voices', label: 'My Voices', Icon: Mic },
+  { id: 'styles', label: 'My Styles', Icon: Layers },
+  { id: 'preferences', label: 'Default Preferences', Icon: SlidersHorizontal },
+];
+
+export function SettingsPage({
+  activeProject,
+  onProjectUpdated,
+  onOpenBackupModal,
+  onSettingsUpdated,
+  initialTab = 'api',
+  onOpenSaveStyleDialog,
+  onNotice,
+}: SettingsPageProps) {
+  const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab);
+
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
+
+  const [status, setStatus] = useState<SystemStatus | null>(null);
+  const [fishSettings, setFishSettings] = useState<FishAudioSettingsSummary | null>(null);
+
+  // Fish Audio API key state
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [showKeyInput, setShowKeyInput] = useState(false);
+  const [editingKey, setEditingKey] = useState(false);
+  const [savingKey, setSavingKey] = useState(false);
+  const [testingConn, setTestingConn] = useState(false);
+  const [removingKey, setRemovingKey] = useState(false);
+  const [fishNotice, setFishNotice] = useState<{
+    kind: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
+  // Default preferences state
+  const [prefs, setPrefs] = useState<DefaultStudioPreferences | null>(null);
+  const [styles, setStyles] = useState<StudioPreset[]>([]);
+  const [savingPrefs, setSavingPrefs] = useState(false);
+  const [prefsMsg, setPrefsMsg] = useState<string | null>(null);
+
+  // Cleanup state
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanupMsg, setCleanupMsg] = useState<string | null>(null);
+
+  const refreshSettingsData = useCallback(async () => {
+    const [sysRes, fishRes, prefRes, stylesRes] = await Promise.all([
+      api.getSystemStatus().catch(() => null),
+      api.getFishAudioSettings().catch(() => null),
+      api.getDefaultPreferences().catch(() => null),
+      api.listStyles().catch(() => null),
+    ]);
+    if (sysRes) setStatus(sysRes);
+    if (fishRes) {
+      setFishSettings(fishRes);
+      if (!fishRes.configured) {
+        setEditingKey(true);
+      }
+    }
+    if (prefRes?.preferences) setPrefs(prefRes.preferences);
+    if (stylesRes?.styles) setStyles(stylesRes.styles);
+  }, []);
+
+  useEffect(() => {
+    void refreshSettingsData();
+  }, [refreshSettingsData]);
+
+  const handleSaveApiKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = apiKeyInput.trim();
+    if (!trimmed) {
+      setFishNotice({ kind: 'error', text: 'Enter your Fish Audio API key first.' });
+      return;
+    }
+
+    setSavingKey(true);
+    setFishNotice(null);
+    try {
+      const updated = await api.saveFishApiKey(trimmed);
+      setFishSettings(updated);
+      setApiKeyInput('');
+      setShowKeyInput(false);
+      setEditingKey(false);
+      setFishNotice({
+        kind: 'success',
+        text: 'Fish Audio API key encrypted and saved securely. Click Test Connection to verify access.',
+      });
+      await api.getSystemStatus().then(setStatus).catch(() => {});
+      onSettingsUpdated?.();
+    } catch (err) {
+      setFishNotice({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Failed to save Fish Audio API key.',
+      });
+    } finally {
+      setSavingKey(false);
+    }
+  };
+
+  const handleTestConnection = async () => {
+    setTestingConn(true);
+    setFishNotice(null);
+    try {
+      const typedCandidate = editingKey && apiKeyInput.trim() ? apiKeyInput.trim() : undefined;
+      const result = await api.testFishAudioConnection(typedCandidate);
+      setFishSettings(result.settings);
+      setFishNotice({
+        kind: result.ok ? 'success' : 'error',
+        text: result.message,
+      });
+      await api.getSystemStatus().then(setStatus).catch(() => {});
+    } catch (err) {
+      setFishNotice({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Connection test failed.',
+      });
+    } finally {
+      setTestingConn(false);
+    }
+  };
+
+  const handleRemoveSavedKey = async () => {
+    setRemovingKey(true);
+    setFishNotice(null);
+    try {
+      const updated = await api.deleteFishApiKey();
+      setFishSettings(updated);
+      setApiKeyInput('');
+      setShowKeyInput(false);
+      setEditingKey(!updated.configured);
+      setFishNotice({
+        kind: 'success',
+        text: updated.configured
+          ? 'Removed saved key; using server environment fallback.'
+          : 'Removed Fish Audio API key from secure backend storage.',
+      });
+      await api.getSystemStatus().then(setStatus).catch(() => {});
+      onSettingsUpdated?.();
+    } catch (err) {
+      setFishNotice({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Failed to remove saved API key.',
+      });
+    } finally {
+      setRemovingKey(false);
+    }
+  };
+
+  const handleUpdatePreferences = async (patch: Partial<DefaultStudioPreferences>) => {
+    setSavingPrefs(true);
+    setPrefsMsg(null);
+    try {
+      const res = await api.updateDefaultPreferences(patch);
+      setPrefs(res.preferences);
+      setPrefsMsg('Default studio preferences saved.');
+      onNotice?.('Default studio preferences updated.');
+    } catch (err) {
+      setPrefsMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingPrefs(false);
+    }
+  };
+
+  const handleCleanup = async () => {
+    setCleaning(true);
+    setCleanupMsg(null);
+    try {
+      const res = await api.runCleanup();
+      setCleanupMsg(`Cleanup complete: ${res.removedFiles} expired temporary items removed.`);
+    } catch (err) {
+      setCleanupMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCleaning(false);
+    }
+  };
+
+  const connStatus = fishSettings?.connectionStatus ?? 'not_connected';
+  const statusInfo =
+    connStatus === 'connected'
+      ? { label: 'Connected', cls: 'border-emerald-500/35 text-emerald-300 bg-emerald-500/10', Icon: CheckCircle2 }
+      : connStatus === 'error'
+      ? { label: 'Error', cls: 'border-red-500/35 text-red-300 bg-red-500/10', Icon: AlertCircle }
+      : { label: 'Not Connected', cls: 'border-white/[0.1] text-zinc-300 bg-zinc-900', Icon: AlertCircle };
+  const StatusIcon = statusInfo.Icon;
+
+  return (
+    <div className="p-4 sm:p-6 max-w-5xl mx-auto space-y-5">
+      <div className="border-b border-white/[0.08] pb-4 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-display font-bold tracking-tight text-white">
+            Settings
+          </h1>
+          <p className="text-xs sm:text-sm text-zinc-400 mt-0.5">
+            Manage Fish Audio credentials, custom narrators, saved styles, and studio defaults.
+          </p>
+        </div>
+      </div>
+
+      {/* Tab Navigation Strip */}
+      <div
+        role="tablist"
+        aria-label="Settings Sections"
+        className="flex items-center gap-1 border-b border-white/[0.08] overflow-x-auto no-scrollbar pb-0"
+      >
+        {TABS.map(({ id, label, Icon }) => {
+          const active = activeTab === id;
+          return (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setActiveTab(id)}
+              className={`min-h-[42px] px-3.5 py-2 text-xs font-medium flex items-center gap-2 whitespace-nowrap shrink-0 border-b-2 transition-colors cursor-pointer ${
+                active
+                  ? 'border-violet-500 text-white bg-white/[0.03]'
+                  : 'border-transparent text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.02]'
+              }`}
+            >
+              <Icon className={`w-3.5 h-3.5 shrink-0 ${active ? 'text-violet-400' : 'text-zinc-500'}`} />
+              <span>{label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* TAB 1: API & INTEGRATIONS */}
+      {activeTab === 'api' && (
+        <div className="space-y-5">
+          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-violet-400 shrink-0" />
+                <h2 className="text-sm font-display font-semibold text-white">
+                  Fish Audio API Credentials
+                </h2>
+              </div>
+
+              <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-xs font-medium ${statusInfo.cls}`}>
+                <StatusIcon className="w-3.5 h-3.5 shrink-0" />
+                <span>{statusInfo.label}</span>
+              </div>
+            </div>
+
+            {fishSettings && !fishSettings.secureStorageAvailable && (
+              <div
+                role="alert"
+                className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200 space-y-1"
+              >
+                <div className="font-semibold text-amber-100">
+                  Backend Encrypted Secret Storage Unavailable
+                </div>
+                <p className="leading-relaxed">{fishSettings.secureStorageDetail}</p>
+              </div>
+            )}
+
+            {fishSettings?.configured && (
+              <div className="p-3 rounded-lg bg-[#18181D] border border-white/[0.08] flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[11px] text-zinc-400 flex items-center gap-1.5">
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span>
+                      {fishSettings.source === 'encrypted_store'
+                        ? 'Saved in encrypted backend store'
+                        : 'Loaded from server environment (FISH_API_KEY)'}
+                    </span>
+                  </div>
+                  <div className="text-xs font-mono text-zinc-100 mt-1 tracking-wider">
+                    {fishSettings.maskedKey}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingKey((prev) => !prev);
+                      setApiKeyInput('');
+                      setShowKeyInput(false);
+                    }}
+                    className="min-h-[36px] px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-white/[0.08] text-xs font-medium text-zinc-200 flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>{editingKey ? 'Cancel Replace' : 'Replace API Key'}</span>
+                  </button>
+
+                  {fishSettings.source === 'encrypted_store' && (
+                    <button
+                      type="button"
+                      onClick={() => void handleRemoveSavedKey()}
+                      disabled={removingKey}
+                      className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/25 text-xs font-medium text-red-300 flex items-center gap-1 whitespace-nowrap cursor-pointer disabled:opacity-40"
+                    >
+                      {removingKey ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-3.5 h-3.5" />
+                      )}
+                      <span>Remove</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {(editingKey || !fishSettings?.configured) && (
+              <form onSubmit={handleSaveApiKey} className="space-y-3">
+                <div>
+                  <label
+                    htmlFor="fish-api-key-input"
+                    className="block text-xs font-medium text-zinc-300 mb-1.5"
+                  >
+                    {fishSettings?.configured ? 'New Fish Audio API Key' : 'Fish Audio API Key'}
+                  </label>
+                  <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
+                    <div className="relative flex-1 min-w-[200px]">
+                      <input
+                        id="fish-api-key-input"
+                        type={showKeyInput ? 'text' : 'password'}
+                        value={apiKeyInput}
+                        onChange={(e) => setApiKeyInput(e.target.value)}
+                        placeholder="Paste your Fish Audio API key..."
+                        autoComplete="off"
+                        spellCheck={false}
+                        disabled={Boolean(fishSettings && !fishSettings.secureStorageAvailable)}
+                        className="w-full min-h-[38px] bg-[#18181D] border border-white/[0.1] rounded-lg pl-3 pr-10 py-2 text-xs font-mono text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-violet-500 disabled:opacity-50"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowKeyInput((v) => !v)}
+                        aria-label={showKeyInput ? 'Hide API Key' : 'Show API Key'}
+                        title={showKeyInput ? 'Hide API Key' : 'Show API Key'}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-white cursor-pointer"
+                      >
+                        {showKeyInput ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={
+                        savingKey ||
+                        !apiKeyInput.trim() ||
+                        Boolean(fishSettings && !fishSettings.secureStorageAvailable)
+                      }
+                      className="min-h-[38px] px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-xs font-semibold text-white flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      {savingKey && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                      <span>Save API Key</span>
+                    </button>
+                  </div>
+                </div>
+              </form>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+              <div className="text-[11px] text-zinc-400 flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                <span>
+                  Encrypted server-side ({fishSettings?.secureStorageMode === 'env_master_key' ? 'SECRETS_ENCRYPTION_KEY' : 'AES-256-GCM'}). Never stored in browser storage, presets, or exports.
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => void handleTestConnection()}
+                disabled={testingConn || (!fishSettings?.configured && !apiKeyInput.trim())}
+                className="min-h-[36px] px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 border border-white/[0.08] text-xs font-medium text-zinc-100 flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                {testingConn ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <PlugZap className="w-3.5 h-3.5 text-violet-400" />
+                )}
+                <span>Test Connection</span>
+              </button>
+            </div>
+
+            {(fishNotice || (connStatus === 'error' && fishSettings?.lastError)) && (
+              <div
+                role="status"
+                className={`p-3 rounded-lg border text-xs flex items-start gap-2 ${
+                  fishNotice?.kind === 'success'
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+                    : 'bg-red-500/10 border-red-500/30 text-red-200'
+                }`}
+              >
+                {fishNotice?.kind === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                )}
+                <span>{fishNotice ? fishNotice.text : fishSettings?.lastError}</span>
+              </div>
+            )}
+          </section>
+
+          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] space-y-1.5">
+            <div className="flex items-center gap-2 text-sm font-display font-semibold text-white">
+              <ShieldAlert className="w-4 h-4 text-amber-400" />
+              Media Rights
+            </div>
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              Use Recap Studio AI only with media you own or have permission to edit.
+            </p>
+          </section>
+        </div>
+      )}
+
+      {/* TAB 2: MY VOICES */}
+      {activeTab === 'voices' && (
+        <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08]">
+          <MyVoicesManager
+            activeProject={activeProject}
+            onProjectUpdated={onProjectUpdated}
+            onNotice={onNotice}
+          />
+        </section>
+      )}
+
+      {/* TAB 3: MY STYLES */}
+      {activeTab === 'styles' && (
+        <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08]">
+          <MyStylesManager
+            activeProject={activeProject}
+            onProjectUpdated={onProjectUpdated}
+            onOpenSaveStyleDialog={onOpenSaveStyleDialog}
+            onStylesChanged={() => {
+              void api.listStyles().then((r) => setStyles(r.styles)).catch(() => {});
+              void api.getDefaultPreferences().then((r) => setPrefs(r.preferences)).catch(() => {});
+            }}
+            onNotice={onNotice}
+          />
+        </section>
+      )}
+
+      {/* TAB 4: DEFAULT PREFERENCES */}
+      {activeTab === 'preferences' && (
+        <div className="space-y-5">
+          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] space-y-4">
+            <div>
+              <h2 className="text-sm font-display font-semibold text-white">
+                Studio Workflow Defaults
+              </h2>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                Configure optional style auto-apply and default translation / dubbing settings for new projects.
+              </p>
+            </div>
+
+            {prefs ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label
+                      htmlFor="pref-default-style"
+                      className="block text-xs font-medium text-zinc-300 mb-1.5"
+                    >
+                      Default Saved Style
+                    </label>
+                    <select
+                      id="pref-default-style"
+                      value={prefs.defaultStyleId || ''}
+                      disabled={savingPrefs}
+                      onChange={(e) =>
+                        void handleUpdatePreferences({
+                          defaultStyleId: e.target.value || null,
+                        })
+                      }
+                      className="w-full min-h-[38px] bg-[#18181D] border border-white/[0.1] rounded-lg px-3 py-1.5 text-xs text-white"
+                    >
+                      <option value="">None (No Default Style)</option>
+                      {styles.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="pref-target-lang"
+                      className="block text-xs font-medium text-zinc-300 mb-1.5"
+                    >
+                      Default Dub Target Language
+                    </label>
+                    <select
+                      id="pref-target-lang"
+                      value={prefs.defaultTargetLanguage}
+                      disabled={savingPrefs}
+                      onChange={(e) =>
+                        void handleUpdatePreferences({
+                          defaultTargetLanguage: e.target.value as SupportedLanguage,
+                        })
+                      }
+                      className="w-full min-h-[38px] bg-[#18181D] border border-white/[0.1] rounded-lg px-3 py-1.5 text-xs text-white"
+                    >
+                      {SUPPORTED_LANGUAGES.map((l) => (
+                        <option key={l} value={l}>
+                          {l}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="pref-sync-mode"
+                      className="block text-xs font-medium text-zinc-300 mb-1.5"
+                    >
+                      Default Timeline Sync Mode
+                    </label>
+                    <select
+                      id="pref-sync-mode"
+                      value={prefs.defaultSyncMode}
+                      disabled={savingPrefs}
+                      onChange={(e) =>
+                        void handleUpdatePreferences({
+                          defaultSyncMode: e.target.value as SyncMode,
+                        })
+                      }
+                      className="w-full min-h-[38px] bg-[#18181D] border border-white/[0.1] rounded-lg px-3 py-1.5 text-xs text-white"
+                    >
+                      <option value="flexible">Flexible (Auto-fit slots)</option>
+                      <option value="continuous">Continuous (Sequential narration)</option>
+                      <option value="match_original">Match Original Timestamps</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-end">
+                    <label className="w-full min-h-[38px] px-3 py-2 rounded-lg bg-[#18181D] border border-white/[0.08] flex items-center justify-between gap-3 text-xs text-zinc-200 cursor-pointer">
+                      <span>Auto-apply Default Style on video import</span>
+                      <input
+                        type="checkbox"
+                        checked={prefs.autoApplyDefaultStyleOnImport}
+                        disabled={savingPrefs}
+                        onChange={(e) =>
+                          void handleUpdatePreferences({
+                            autoApplyDefaultStyleOnImport: e.target.checked,
+                          })
+                        }
+                        className="accent-violet-500"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                {prefsMsg && (
+                  <div className="text-xs text-emerald-400 flex items-center gap-1.5">
+                    <Check className="w-3.5 h-3.5" />
+                    <span>{prefsMsg}</span>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-xs text-zinc-400 flex items-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" /> Loading preferences...
+              </div>
+            )}
+          </section>
+
+          {/* Engine & Service Status */}
+          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] space-y-4">
+            <h2 className="text-sm font-display font-semibold text-white">
+              Engine &amp; Service Status
+            </h2>
+
+            {!status ? (
+              <div className="text-xs text-zinc-400 flex items-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" /> Checking status...
+              </div>
+            ) : (
+              <div className="divide-y divide-white/[0.06] text-xs">
+                <div className="py-3 flex items-center justify-between gap-4">
+                  <div>
+                    <div className="font-medium text-zinc-100">Fish Audio Dubbing</div>
+                    <div className="text-zinc-500 mt-0.5">Voice synthesis &amp; speech transcription</div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0 font-medium">
+                    {status.fishConfigured ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                        <span className="text-emerald-300">Ready</span>
+                      </>
+                    ) : (
+                      <>
+                        <AlertCircle className="w-4 h-4 text-amber-400" />
+                        <span className="text-amber-300">Not Configured</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="py-3 flex items-center justify-between gap-4">
+                  <div>
+                    <div className="font-medium text-zinc-100">Gemini Translation</div>
+                    <div className="text-zinc-500 mt-0.5">External manual workflow always ready</div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0 font-medium">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    <span className="text-emerald-300">
+                      {status.geminiConfigured ? 'API + Manual Ready' : 'Manual Ready'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="py-3 flex items-center justify-between gap-4">
+                  <div>
+                    <div className="font-medium text-zinc-100">FFmpeg Renderer</div>
+                    <div className="text-zinc-500 mt-0.5 font-mono">v{status.ffmpegVersion}</div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0 font-medium">
+                    {status.ffmpegAvailable ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                        <span className="text-emerald-300">Ready</span>
+                      </>
+                    ) : (
+                      <>
+                        <AlertCircle className="w-4 h-4 text-red-400" />
+                        <span className="text-red-300">Unavailable</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="py-3 flex items-center justify-between gap-4">
+                  <div>
+                    <div className="font-medium text-zinc-100">Media Stream Analyzer</div>
+                    <div className="text-zinc-500 mt-0.5">Reads resolution, duration &amp; audio sync</div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0 font-medium">
+                    {status.ffprobeAvailable ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                        <span className="text-emerald-300">Ready</span>
+                      </>
+                    ) : (
+                      <>
+                        <AlertCircle className="w-4 h-4 text-red-400" />
+                        <span className="text-red-300">Unavailable</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* Storage & Temporary File Cleanup */}
+          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-display font-semibold text-white">
+                  Storage &amp; Cleanup
+                </h2>
+                <p className="text-xs text-zinc-400 mt-0.5 tabular-nums">
+                  Max upload: {status?.maxUploadSizeMb ?? 2048} MB · Retention:{' '}
+                  {status?.tempRetentionHours ?? 24}h
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleCleanup}
+                disabled={cleaning}
+                className="min-h-[38px] px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-100 flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              >
+                {cleaning ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="w-3.5 h-3.5" />
+                )}
+                <span>Clean Temp Files</span>
+              </button>
+            </div>
+
+            {cleanupMsg && <div className="text-xs text-emerald-400">{cleanupMsg}</div>}
+          </section>
+
+          {/* Portable Backup Studio */}
+          <section className="p-5 rounded-xl bg-[#111115] border border-white/[0.08] flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-display font-semibold text-white">
+                Local Storage &amp; Backups
+              </h2>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                Export or restore complete project archives.
+              </p>
+            </div>
+            {onOpenBackupModal && (
+              <button
+                type="button"
+                onClick={onOpenBackupModal}
+                className="min-h-[38px] px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Archive className="w-3.5 h-3.5" />
+                <span>Manage Backups</span>
+              </button>
+            )}
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
