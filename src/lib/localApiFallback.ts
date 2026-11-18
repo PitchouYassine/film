@@ -176,6 +176,10 @@ export async function handleLocalApiFallback<T>(url: string, init?: RequestInit)
   const waveformMatch = /^\/api\/projects\/([^/]+)\/audio-waveforms$/.exec(pathname);
   if (waveformMatch && method === 'GET') {
     const projId = waveformMatch[1];
+    const cached = await idbGet<{ id: string; waveforms: any }>('waveforms', projId);
+    if (cached && cached.waveforms) {
+      return cached.waveforms as unknown as T;
+    }
     const proj = await idbGet<Project>('projects', projId);
     const peaks = proj?.waveformPeaks || [];
     return {

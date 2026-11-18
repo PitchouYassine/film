@@ -108,12 +108,22 @@ async function withStore<T>(
   fn: (store: IDBObjectStore) => IDBRequest<T>
 ): Promise<T> {
   const db = await openDb();
+  if (!db.objectStoreNames.contains(storeName)) {
+    console.warn(
+      `[IndexedDB Warning] Store "${storeName}" not found in database "${db.name}" (version ${db.version}). Available stores: [${Array.from(db.objectStoreNames).join(', ')}]`
+    );
+    return undefined as unknown as T;
+  }
   return new Promise<T>((resolve, reject) => {
-    const tx = db.transaction(storeName, mode);
-    const store = tx.objectStore(storeName);
-    const req = fn(store);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error || new Error(`IndexedDB operation failed on ${storeName}`));
+    try {
+      const tx = db.transaction(storeName, mode);
+      const store = tx.objectStore(storeName);
+      const req = fn(store);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error(`IndexedDB operation failed on ${storeName}`));
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 

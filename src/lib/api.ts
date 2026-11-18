@@ -944,6 +944,7 @@ export async function uploadVideoChunked(params: {
 
     await idbSet('projects', project.id, project);
     await idbSet('filmstrips', project.id, { id: project.id, frames: result.filmstrip, duration: result.duration });
+    await idbSet('waveforms', project.id, { id: project.id, waveforms: result.waveforms });
     onProgress(100, 'Local browser processing complete');
     return project;
   }
