@@ -21,8 +21,14 @@ import {
   SyncMode,
   SystemStatus,
   VideoMetadata,
+  DEFAULT_SUBTITLE_STYLE,
+  DEFAULT_VIDEO_EFFECTS,
+  DEFAULT_VIDEO_CANVAS,
 } from '../types/studio';
 import type { FontCatalogItem } from './fontCatalog';
+import { handleLocalApiFallback } from './localApiFallback';
+import { processVideoUploadInBrowser } from './browserVideoProcessor';
+import { idbGet, idbSet } from './browserStorage';
 
 export interface LocalAssetManifestItem {
   localUrl: string;
@@ -60,33 +66,32 @@ export function resolveApiUrl(path: string): string {
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const fullUrl = resolveApiUrl(url);
-  const res = await fetch(fullUrl, init);
-  const raw = await res.text();
-  let data: Record<string, unknown> | null = null;
-  if (raw) {
-    try {
-      data = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      data = null;
-    }
-  }
-  if (!res.ok) {
-    let errMsg = typeof data?.error === 'string' ? data.error : '';
-    if (!errMsg) {
-      if (res.status === 405) {
-        errMsg = `Request failed (405 Method Not Allowed): Cloudflare Pages only serves static files and rejected the ${
-          init?.method || 'POST'
-        } request. Set BACKEND_URL in Cloudflare Pages or VITE_API_BASE_URL to your Express backend.`;
-      } else {
-        errMsg = `Request failed (${res.status})`;
+  try {
+    const res = await fetch(fullUrl, init);
+    const raw = await res.text();
+    let data: Record<string, unknown> | null = null;
+    if (raw) {
+      try {
+        data = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        data = null;
       }
     }
-    throw new Error(errMsg);
+    if (!res.ok) {
+      const errMsg = typeof data?.error === 'string' ? data.error : `Request failed (${res.status})`;
+      throw new Error(errMsg);
+    }
+    if (!data) {
+      throw new Error('Server returned an unexpected non-JSON response. Please try again.');
+    }
+    return data as T;
+  } catch (err) {
+    const localResult = await handleLocalApiFallback<T>(url, init);
+    if (localResult !== undefined) {
+      return localResult;
+    }
+    throw err;
   }
-  if (!data) {
-    throw new Error('Server returned an unexpected non-JSON response. Please try again.');
-  }
-  return data as T;
 }
 
 export interface PresetApplyOptions {
@@ -791,57 +796,154 @@ export async function uploadVideoChunked(params: {
   onProgress: (pct: number, stage: string) => void;
 }): Promise<Project> {
   const { projectId, file, onProgress } = params;
-  const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB chunks
-  const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
 
-  onProgress(2, 'Initializing chunked upload...');
-  const initRes = await request<{ uploadId: string; totalChunks: number }>('/api/uploads/init', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      projectId,
-      filename: file.name,
-      totalSize: file.size,
-      totalChunks,
-    }),
-  });
+  try {
+    const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB chunks
+    const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
 
-  for (let i = 0; i < totalChunks; i++) {
-    const start = i * CHUNK_SIZE;
-    const end = Math.min(file.size, start + CHUNK_SIZE);
-    const slice = file.slice(start, end);
-    const buffer = await slice.arrayBuffer();
-
-    const chunkUrl = resolveApiUrl(`/api/uploads/${initRes.uploadId}/chunk?index=${i}`);
-    const chunkRes = await fetch(chunkUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: buffer,
-    });
-    if (!chunkRes.ok) {
-      const errData = await chunkRes.json().catch(() => ({}));
-      if (chunkRes.status === 405) {
-        throw new Error(
-          `Chunk ${i + 1} upload failed (405 Method Not Allowed): Cloudflare Pages does not support POST requests on static routes. Please set BACKEND_URL in Cloudflare Pages or VITE_API_BASE_URL to point to your Node.js Express server.`
-        );
-      }
-      throw new Error(errData.error || `Chunk ${i + 1} upload failed (${chunkRes.status})`);
-    }
-
-    const pct = Math.round(5 + ((i + 1) / totalChunks) * 80);
-    onProgress(pct, `Uploading chunk ${i + 1} of ${totalChunks}...`);
-  }
-
-  onProgress(90, 'Analyzing video streams & extracting audio waveform...');
-  const completeRes = await request<{ project: Project }>(
-    `/api/uploads/${initRes.uploadId}/complete`,
-    {
+    onProgress(2, 'Initializing chunked upload...');
+    const initRes = await request<{ uploadId: string; totalChunks: number }>('/api/uploads/init', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectId }),
-    }
-  );
+      body: JSON.stringify({
+        projectId,
+        filename: file.name,
+        totalSize: file.size,
+        totalChunks,
+      }),
+    });
 
-  onProgress(100, 'Upload complete');
-  return completeRes.project;
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(file.size, start + CHUNK_SIZE);
+      const slice = file.slice(start, end);
+      const buffer = await slice.arrayBuffer();
+
+      const chunkUrl = resolveApiUrl(`/api/uploads/${initRes.uploadId}/chunk?index=${i}`);
+      const chunkRes = await fetch(chunkUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: buffer,
+      });
+      if (!chunkRes.ok) {
+        throw new Error(`Chunk ${i + 1} upload failed (${chunkRes.status})`);
+      }
+
+      const pct = Math.round(5 + ((i + 1) / totalChunks) * 80);
+      onProgress(pct, `Uploading chunk ${i + 1} of ${totalChunks}...`);
+    }
+
+    onProgress(90, 'Analyzing video streams & extracting audio waveform...');
+    const completeRes = await request<{ project: Project }>(
+      `/api/uploads/${initRes.uploadId}/complete`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId }),
+      }
+    );
+
+    onProgress(100, 'Upload complete');
+    return completeRes.project;
+  } catch (err) {
+    // Fallback to local browser-side video processing via FFmpeg.wasm & IndexedDB
+    onProgress(5, 'Backend server offline. Processing video locally in browser...');
+    const result = await processVideoUploadInBrowser(file, onProgress);
+
+    let project = await idbGet<Project>('projects', projectId);
+    if (!project) {
+      project = {
+        id: projectId,
+        name: file.name.replace(/\.[^/.]+$/, ''),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        sourceVideoUrl: result.sourceVideoUrl,
+        sourceFilename: file.name,
+        thumbnailUrl: null,
+        metadata: result.metadata,
+        waveformPeaks: result.waveforms.orig,
+        captions: [],
+        subtitleStyle: DEFAULT_SUBTITLE_STYLE,
+        translation: { sourceLanguage: 'English', targetLanguage: 'English', preserveProperNouns: true },
+        voice: {
+          enabled: false,
+          provider: 'fish',
+          syncMode: 'flexible',
+          targetLanguage: 'English',
+          gender: 'female',
+          voiceName: 'Puck',
+          style: 'narrative',
+          narrationStyle: 'cinematic',
+          speakingSpeed: 1.0,
+          voiceVolume: 1.0,
+          timingOffsetSec: 0,
+          preserveOriginalAudio: true,
+          originalAudioVolume: 0.3,
+          fadeInSec: 0.5,
+          fadeOutSec: 0.5,
+          bgMusicVolume: 0.2,
+          generatedClips: [],
+        },
+        blurs: [],
+        logos: [],
+        videoEffects: {
+          filterPreset: 'cinematic',
+          filterIntensity: 100,
+          filterStack: [],
+          adjustments: { brightness: 0, contrast: 0, saturation: 0, exposure: 0, temperature: 0, tint: 0, highlights: 0, shadows: 0, sharpness: 0, vignette: 0, fade: 0 },
+          effects: [],
+          compareMode: false,
+        },
+        canvas: {
+          aspectRatio: '9:16',
+          customWidth: 1080,
+          customHeight: 1920,
+          zoom: 1.0,
+          offsetX: 0,
+          offsetY: 0,
+          cropTop: 0,
+          cropRight: 0,
+          cropBottom: 0,
+          cropLeft: 0,
+          backgroundType: 'solid',
+          bgColor: '#0B0B0F',
+          bgImageScale: 1.0,
+          bgImageOffsetX: 0,
+          bgImageOffsetY: 0,
+          bgBlurIntensity: 20,
+          bgBlurBrightness: 100,
+          bgBlurOpacity: 100,
+        },
+        exportSettings: {
+          aspectRatio: '9:16',
+          resolution: '1080p',
+          fitMode: 'blur-pad',
+          format: 'mp4',
+          videoCodec: 'h264',
+          audioCodec: 'aac',
+          applyBlur: true,
+          applyLogo: true,
+          applyVideoEffects: true,
+          applyCaptions: false,
+          applyDubbing: true,
+          applyAudioMix: true,
+        },
+        lastExportUrl: null,
+        lastExportSize: null,
+        lastExportedAt: null,
+        videoClips: [],
+        originalAudioClips: [],
+      };
+    } else {
+      project.sourceVideoUrl = result.sourceVideoUrl;
+      project.sourceFilename = file.name;
+      project.metadata = result.metadata;
+      project.waveformPeaks = result.waveforms.orig;
+      project.updatedAt = new Date().toISOString();
+    }
+
+    await idbSet('projects', project.id, project);
+    onProgress(100, 'Local browser processing complete');
+    return project;
+  }
 }

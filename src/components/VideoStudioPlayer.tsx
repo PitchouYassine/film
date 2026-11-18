@@ -581,33 +581,50 @@ export function VideoStudioPlayer({
     dub: string | null;
     music: string | null;
     sfx: string | null;
+    bgImage: string | null;
+    logos: Record<string, string>;
   }>({
     video: project.sourceVideoUrl,
     dub: project.voice.fullDubUrl || null,
     music: project.voice.bgMusicUrl || null,
     sfx: project.voice.sfxUrl || null,
+    bgImage: project.canvas?.bgImageUrl || null,
+    logos: {},
   });
 
   useEffect(() => {
     let active = true;
-    setResolvedUrls({
+    const bgUrl = project.canvas?.bgImageUrl || null;
+    const logoList = project.logos || [];
+    setResolvedUrls((prev) => ({
+      ...prev,
       video: project.sourceVideoUrl,
       dub: project.voice.fullDubUrl || null,
       music: project.voice.bgMusicUrl || null,
       sfx: project.voice.sfxUrl || null,
-    });
+      bgImage: bgUrl,
+    }));
     void Promise.all([
       resolvePlayableAssetUrl(project.sourceVideoUrl, project.cloudAssets),
       resolvePlayableAssetUrl(project.voice.fullDubUrl || null, project.cloudAssets),
       resolvePlayableAssetUrl(project.voice.bgMusicUrl || null, project.cloudAssets),
       resolvePlayableAssetUrl(project.voice.sfxUrl || null, project.cloudAssets),
-    ]).then(([video, dub, music, sfx]) => {
+      resolvePlayableAssetUrl(bgUrl, project.cloudAssets),
+      Promise.all(
+        logoList.map(async (l) => [
+          l.id,
+          (await resolvePlayableAssetUrl(l.url, project.cloudAssets)) || l.url,
+        ] as const)
+      ),
+    ]).then(([video, dub, music, sfx, bgImage, logoEntries]) => {
       if (!active) return;
       setResolvedUrls({
         video: video || project.sourceVideoUrl,
         dub: dub || project.voice.fullDubUrl || null,
         music: music || project.voice.bgMusicUrl || null,
         sfx: sfx || project.voice.sfxUrl || null,
+        bgImage: bgImage || bgUrl,
+        logos: Object.fromEntries(logoEntries),
       });
     });
     return () => {
@@ -618,6 +635,8 @@ export function VideoStudioPlayer({
     project.voice.fullDubUrl,
     project.voice.bgMusicUrl,
     project.voice.sfxUrl,
+    project.canvas?.bgImageUrl,
+    project.logos,
     project.cloudAssets,
   ]);
 
@@ -3094,7 +3113,7 @@ export function VideoStudioPlayer({
                   } ${onUpdateCanvas && !canvas.bgImageLocked ? 'cursor-move' : ''}`}
                 >
                   <img
-                    src={canvas.bgImageUrl}
+                    src={resolvedUrls.bgImage || canvas.bgImageUrl}
                     alt="Canvas background"
                     draggable={false}
                     className="w-full h-full object-cover pointer-events-none select-none"
@@ -3865,7 +3884,7 @@ export function VideoStudioPlayer({
                   }}
                 >
                   <img
-                    src={logo.url}
+                    src={resolvedUrls.logos[logo.id] || logo.url}
                     alt={logo.filename}
                     draggable={false}
                     className="w-full h-auto pointer-events-none select-none"

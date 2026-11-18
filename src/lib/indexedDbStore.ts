@@ -261,4 +261,91 @@ export const indexedDbStore = {
       return null;
     }
   },
+
+  async cacheMediaByUrl(
+    url: string,
+    blob: Blob,
+    filename?: string,
+    mimeType?: string
+  ): Promise<void> {
+    const key = normalizeMediaUrlCacheKey(url);
+    if (!key) return;
+    try {
+      await withStore('mediaCache', 'readwrite', (s) =>
+        s.put({
+          sha256: key,
+          filename: filename || url.split('/').pop()?.split('?')[0] || 'asset.bin',
+          mimeType: mimeType || blob.type || 'application/octet-stream',
+          sizeBytes: blob.size,
+          blob,
+          cachedAt: new Date().toISOString(),
+        } satisfies CachedMediaEntry)
+      );
+    } catch {
+      // ignore IDB quota overflow silently
+    }
+  },
+
+  async getCachedMediaByUrl(url: string): Promise<CachedMediaEntry | null> {
+    const key = normalizeMediaUrlCacheKey(url);
+    if (!key) return null;
+    try {
+      const entry = await withStore<CachedMediaEntry | undefined>('mediaCache', 'readonly', (s) =>
+        s.get(key)
+      );
+      return entry || null;
+    } catch {
+      return null;
+    }
+  },
+
+  async deleteCachedMediaByUrl(url: string): Promise<void> {
+    const key = normalizeMediaUrlCacheKey(url);
+    if (!key) return;
+    try {
+      await withStore('mediaCache', 'readwrite', (s) => s.delete(key));
+    } catch {
+      // ignore
+    }
+  },
+
+  async getCachedMediaUsage(): Promise<{
+    totalBytes: number;
+    buckets: Record<string, { bytes: number; files: number }>;
+  }> {
+    try {
+      const entries = await withStore<CachedMediaEntry[]>('mediaCache', 'readonly', (s) =>
+        s.getAll()
+      );
+      const buckets: Record<string, { bytes: number; files: number }> = {};
+      let totalBytes = 0;
+      for (const entry of entries || []) {
+        const size = entry.sizeBytes || entry.blob?.size || 0;
+        totalBytes += size;
+        const match = /^url:\/(?:media|storage)\/([^/]+)/.exec(entry.sha256);
+        const bucket = match ? match[1] : 'cached';
+        if (!buckets[bucket]) buckets[bucket] = { bytes: 0, files: 0 };
+        buckets[bucket].bytes += size;
+        buckets[bucket].files += 1;
+      }
+      return { totalBytes, buckets };
+    } catch {
+      return { totalBytes: 0, buckets: {} };
+    }
+  },
 };
+
+export function normalizeMediaUrlCacheKey(url: string): string {
+  if (!url) return '';
+  const noHash = url.split('#')[0];
+  const noQuery = noHash.split('?')[0];
+  if (noQuery.startsWith('http://') || noQuery.startsWith('https://')) {
+    try {
+      const u = new URL(noQuery);
+      return `url:${u.pathname}`;
+    } catch {
+      return `url:${noQuery}`;
+    }
+  }
+  return `url:${noQuery}`;
+}
