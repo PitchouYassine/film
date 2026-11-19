@@ -221,8 +221,18 @@ export default function App() {
   const patchSeqRef = useRef(0);
   const activeUndoGroupRef = useRef<{ key: string; timerId: number } | null>(null);
 
-  // Top-level Shell Views & Modals
-  const [activeView, setActiveView] = useState<'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'settings'>('projects');
+  // Top-level Shell Views & Modals (Restored from localStorage session cache)
+  const [activeView, setActiveView] = useState<'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'settings'>(() => {
+    try {
+      const lastView = window.localStorage.getItem('recap_studio_last_active_view');
+      return lastView === 'translator' || lastView === 'voice' || lastView === 'editor' || lastView === 'export'
+        ? lastView
+        : 'projects';
+    } catch {
+      return 'projects';
+    }
+  });
+
   const [settingsReturnView, setSettingsReturnView] = useState<'projects' | 'translator' | 'voice' | 'editor' | 'export'>('projects');
   const [focusTranslationOverflowSignal, setFocusTranslationOverflowSignal] = useState(0);
   const [cloudModalOpen, setCloudModalOpen] = useState(false);
@@ -230,18 +240,28 @@ export default function App() {
   const [myStylesModalOpen, setMyStylesModalOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTabId>('api');
 
+  const updateActiveView = useCallback((view: 'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'settings') => {
+    setActiveView(view);
+    try {
+      window.localStorage.setItem('recap_studio_last_active_view', view);
+    } catch {
+      // ignore
+    }
+  }, []);
+
   const openSettingsPage = useCallback((tab: SettingsTabId = 'api') => {
     videoRef.current?.pause();
     setActiveTool(null);
     setMoreMenuOpen(false);
     setSettingsInitialTab(tab);
+    updateActiveView('settings');
     setActiveView((prev) => {
       if (prev !== 'settings') {
         setSettingsReturnView(prev);
       }
       return 'settings';
     });
-  }, []);
+  }, [updateActiveView]);
 
   // Active Tool Sheet (mobile drawer), Docked Inspector Tool (desktop), & Resizable Timeline Height
   const [activeTool, setActiveTool] = useState<StudioToolId | null>(null);
@@ -277,7 +297,13 @@ export default function App() {
 
   // Workspace Data State
   const [projects, setProjects] = useState<Project[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(() => {
+    try {
+      return window.localStorage.getItem('recap_studio_last_active_project_id') || null;
+    } catch {
+      return null;
+    }
+  });
   const [recentJobs, setRecentJobs] = useState<RenderJob[]>([]);
   const [customFonts, setCustomFonts] = useState<SavedFontAsset[]>([]);
   const [presetWarnings, setPresetWarnings] = useState<PresetWarning[]>([]);
@@ -362,8 +388,19 @@ export default function App() {
       if (Array.isArray(fontRes?.fonts)) {
         setCustomFonts(fontRes.fonts);
       }
+
       setActiveProjectId((prev) => {
-        if (prev && validProjects.some((p) => p.id === prev)) return prev;
+        let restoredId = prev;
+        try {
+          if (!restoredId) {
+            restoredId = window.localStorage.getItem('recap_studio_last_active_project_id');
+          }
+        } catch {
+          // ignore
+        }
+        if (restoredId && validProjects.some((p) => p.id === restoredId)) {
+          return restoredId;
+        }
         return validProjects[0]?.id || null;
       });
     } catch {
@@ -371,7 +408,20 @@ export default function App() {
       if (cached.length > 0) {
         projectsRef.current = cached;
         setProjects(cached);
-        setActiveProjectId((prev) => prev || cached[0]?.id || null);
+        setActiveProjectId((prev) => {
+          let restoredId = prev;
+          try {
+            if (!restoredId) {
+              restoredId = window.localStorage.getItem('recap_studio_last_active_project_id');
+            }
+          } catch {
+            // ignore
+          }
+          if (restoredId && cached.some((p) => p.id === restoredId)) {
+            return restoredId;
+          }
+          return cached[0]?.id || null;
+        });
       }
     } finally {
       setLoading(false);
@@ -804,12 +854,28 @@ export default function App() {
     [updateToolMemory]
   );
 
+  // Persist active project ID and active view in localStorage whenever changed
+  const updateActiveProjectId = useCallback((id: string | null) => {
+    setActiveProjectId(id);
+    try {
+      if (id) {
+        window.localStorage.setItem('recap_studio_last_active_project_id', id);
+      } else {
+        window.localStorage.removeItem('recap_studio_last_active_project_id');
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+
+
   const handleSelectProject = useCallback(
     (project: Project, navigateTo?: NavPage) => {
       if (!project || !project.id) return;
       videoRef.current?.pause();
       handleProjectUpdated(project);
-      setActiveProjectId(project.id);
+      updateActiveProjectId(project.id);
       setCurrentTime(0);
       setSelectedBlurId(project.blurs?.[0]?.id || null);
       setSelectedLogoId(project.logos?.[0]?.id || null);
@@ -819,7 +885,7 @@ export default function App() {
       setMoreMenuOpen(false);
 
       if (navigateTo === 'dashboard') {
-        setActiveView('projects');
+        updateActiveView('projects');
         setActiveTool(null);
         return;
       }
@@ -830,26 +896,26 @@ export default function App() {
       }
 
       if (!project.sourceVideoUrl && !project.sourceVideoBlobKey && !navigateTo) {
-        setActiveView('projects');
+        updateActiveView('projects');
         setActiveTool(null);
         return;
       }
 
       if (navigateTo === 'export') {
         setActiveTool(null);
-        setActiveView('export');
+        updateActiveView('export');
         return;
       }
 
       if (navigateTo === 'translator') {
         setActiveTool(null);
-        setActiveView('translator');
+        updateActiveView('translator');
         return;
       }
 
       if (navigateTo === 'voice') {
         setActiveTool(null);
-        setActiveView('voice');
+        updateActiveView('voice');
         return;
       }
 
@@ -859,7 +925,7 @@ export default function App() {
         navigateTo === 'blur' ||
         navigateTo === 'branding'
       ) {
-        setActiveView('editor');
+        updateActiveView('editor');
         if (navigateTo === 'captions') {
           handleOpenTool('captions', 'style');
         } else if (navigateTo === 'blur') {
@@ -880,17 +946,17 @@ export default function App() {
         Boolean(project.workflow?.completedStages?.includes('voice'));
 
       if (alreadyValidated || project.workflow?.completedStages?.includes('editor')) {
-        setActiveView('editor');
+        updateActiveView('editor');
         setActiveTool(null);
       } else if (ready.translationValid) {
-        setActiveView('voice');
+        updateActiveView('voice');
         setActiveTool(null);
       } else {
-        setActiveView('translator');
+        updateActiveView('translator');
         setActiveTool(null);
       }
     },
-    [handleOpenTool, handleProjectUpdated, openSettingsPage]
+    [handleOpenTool, handleProjectUpdated, openSettingsPage, updateActiveProjectId, updateActiveView]
   );
 
   const handleValidatedContinue = useCallback(
@@ -900,12 +966,12 @@ export default function App() {
       setCurrentTime(0);
       setSelectedElement(null);
       setActiveTool(null);
-      setActiveView('editor');
+      updateActiveView('editor');
       showNotice(
         `Loaded video, narration audio (${validatedProject.voice.generatedClips.length} clips), and timing into Editor.`
       );
     },
-    [handleProjectUpdated, showNotice]
+    [handleProjectUpdated, showNotice, updateActiveView]
   );
 
   const handleSeek = useCallback((t: number) => {
