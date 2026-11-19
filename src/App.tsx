@@ -121,6 +121,7 @@ import { SavedStylesPage } from './pages/SavedStylesPage';
 import { SettingsPage, SettingsTabId } from './pages/SettingsPage';
 import { SaveStyleDialog } from './components/SaveStyleDialog';
 import { MyStylesManager } from './components/MyStylesManager';
+import { AppView, parseCurrentRoute, syncBrowserUrl } from './lib/appRouter';
 import { BookmarkPlus } from 'lucide-react';
 
 interface EditableSnapshot {
@@ -222,47 +223,56 @@ export default function App() {
   const patchSeqRef = useRef(0);
   const activeUndoGroupRef = useRef<{ key: string; timerId: number } | null>(null);
 
-  // Top-level Shell Views & Modals (Restored from localStorage session cache)
-  const [activeView, setActiveView] = useState<'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'settings' | 'styles'>(() => {
-    try {
-      const lastView = window.localStorage.getItem('recap_studio_last_active_view');
-      return lastView === 'translator' || lastView === 'voice' || lastView === 'editor' || lastView === 'export' || lastView === 'styles' || lastView === 'settings'
-        ? lastView
-        : 'projects';
-    } catch {
-      return 'projects';
-    }
-  });
-
-  const [settingsReturnView, setSettingsReturnView] = useState<'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'styles'>('projects');
+  // Top-level Shell Views & Modals (Parsed from initial URL route or session cache)
+  const initialRoute = useMemo(() => parseCurrentRoute(), []);
+  const [activeView, setActiveView] = useState<AppView>(initialRoute.view);
+  const [settingsReturnView, setSettingsReturnView] = useState<AppView>('projects');
   const [focusTranslationOverflowSignal, setFocusTranslationOverflowSignal] = useState(0);
   const [cloudModalOpen, setCloudModalOpen] = useState(false);
   const [saveStyleModalOpen, setSaveStyleModalOpen] = useState(false);
   const [myStylesModalOpen, setMyStylesModalOpen] = useState(false);
-  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTabId>('api');
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTabId>(initialRoute.settingsTab || 'api');
 
-  const updateActiveView = useCallback((view: 'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'settings' | 'styles') => {
-    setActiveView(view);
-    try {
-      window.localStorage.setItem('recap_studio_last_active_view', view);
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  const openSettingsPage = useCallback((tab: SettingsTabId = 'api') => {
-    videoRef.current?.pause();
-    setActiveTool(null);
-    setMoreMenuOpen(false);
-    setSettingsInitialTab(tab);
-    updateActiveView('settings');
-    setActiveView((prev) => {
-      if (prev !== 'settings') {
-        setSettingsReturnView(prev);
+  const updateActiveView = useCallback(
+    (
+      view: AppView,
+      opts?: {
+        projectId?: string | null;
+        settingsTab?: SettingsTabId;
+        replace?: boolean;
       }
-      return 'settings';
-    });
-  }, [updateActiveView]);
+    ) => {
+      setActiveView(view);
+      const targetProjId =
+        opts?.projectId !== undefined ? opts.projectId : activeProjectIdRef.current;
+      if (opts?.settingsTab) {
+        setSettingsInitialTab(opts.settingsTab);
+      }
+      syncBrowserUrl(view, {
+        projectId: targetProjId,
+        settingsTab: opts?.settingsTab,
+        replace: opts?.replace,
+      });
+    },
+    []
+  );
+
+  const openSettingsPage = useCallback(
+    (tab: SettingsTabId = 'api') => {
+      videoRef.current?.pause();
+      setActiveTool(null);
+      setMoreMenuOpen(false);
+      setSettingsInitialTab(tab);
+      setActiveView((prev) => {
+        if (prev !== 'settings') {
+          setSettingsReturnView(prev);
+        }
+        return 'settings';
+      });
+      updateActiveView('settings', { settingsTab: tab });
+    },
+    [updateActiveView]
+  );
 
   // Active Tool Sheet (mobile drawer), Docked Inspector Tool (desktop), & Resizable Timeline Height
   const [activeTool, setActiveTool] = useState<StudioToolId | null>(null);
@@ -300,6 +310,10 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(() => {
     try {
+      const route = parseCurrentRoute();
+      if (route.projectId) {
+        return route.projectId;
+      }
       return window.localStorage.getItem('recap_studio_last_active_project_id') || null;
     } catch {
       return null;
@@ -391,6 +405,11 @@ export default function App() {
       }
 
       setActiveProjectId((prev) => {
+        const route = parseCurrentRoute();
+        if (route.projectId && validProjects.some((p) => p.id === route.projectId)) {
+          activeProjectIdRef.current = route.projectId;
+          return route.projectId;
+        }
         let restoredId = prev;
         try {
           if (!restoredId) {
@@ -400,9 +419,12 @@ export default function App() {
           // ignore
         }
         if (restoredId && validProjects.some((p) => p.id === restoredId)) {
+          activeProjectIdRef.current = restoredId;
           return restoredId;
         }
-        return validProjects[0]?.id || null;
+        const fallback = validProjects[0]?.id || null;
+        activeProjectIdRef.current = fallback;
+        return fallback;
       });
     } catch {
       const cached = await indexedDbStore.listProjectSnapshots();
@@ -410,6 +432,11 @@ export default function App() {
         projectsRef.current = cached;
         setProjects(cached);
         setActiveProjectId((prev) => {
+          const route = parseCurrentRoute();
+          if (route.projectId && cached.some((p) => p.id === route.projectId)) {
+            activeProjectIdRef.current = route.projectId;
+            return route.projectId;
+          }
           let restoredId = prev;
           try {
             if (!restoredId) {
@@ -419,14 +446,44 @@ export default function App() {
             // ignore
           }
           if (restoredId && cached.some((p) => p.id === restoredId)) {
+            activeProjectIdRef.current = restoredId;
             return restoredId;
           }
-          return cached[0]?.id || null;
+          const fallback = cached[0]?.id || null;
+          activeProjectIdRef.current = fallback;
+          return fallback;
         });
       }
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  // Synchronize browser URL on first mount (canonical path)
+  useEffect(() => {
+    const route = parseCurrentRoute();
+    syncBrowserUrl(route.view, {
+      projectId: route.projectId || activeProjectIdRef.current,
+      settingsTab: route.settingsTab,
+      replace: true,
+    });
+  }, []);
+
+  // Listen to browser Back/Forward (popstate) navigation
+  useEffect(() => {
+    const handlePopState = () => {
+      const route = parseCurrentRoute();
+      setActiveView(route.view);
+      if (route.settingsTab) {
+        setSettingsInitialTab(route.settingsTab);
+      }
+      if (route.projectId) {
+        setActiveProjectId(route.projectId);
+        activeProjectIdRef.current = route.projectId;
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   useEffect(() => {
@@ -858,6 +915,7 @@ export default function App() {
   // Persist active project ID and active view in localStorage whenever changed
   const updateActiveProjectId = useCallback((id: string | null) => {
     setActiveProjectId(id);
+    activeProjectIdRef.current = id;
     try {
       if (id) {
         window.localStorage.setItem('recap_studio_last_active_project_id', id);
@@ -867,9 +925,11 @@ export default function App() {
     } catch {
       // ignore
     }
+    setActiveView((currView) => {
+      syncBrowserUrl(currView, { projectId: id, replace: true });
+      return currView;
+    });
   }, []);
-
-
 
   const handleSelectProject = useCallback(
     (project: Project, navigateTo?: NavPage) => {
@@ -896,6 +956,12 @@ export default function App() {
         return;
       }
 
+      if (navigateTo === 'styles') {
+        updateActiveView('styles');
+        setActiveTool(null);
+        return;
+      }
+
       if (!project.sourceVideoUrl && !project.sourceVideoBlobKey && !navigateTo) {
         updateActiveView('projects');
         setActiveTool(null);
@@ -904,19 +970,19 @@ export default function App() {
 
       if (navigateTo === 'export') {
         setActiveTool(null);
-        updateActiveView('export');
+        updateActiveView('export', { projectId: project.id });
         return;
       }
 
       if (navigateTo === 'translator') {
         setActiveTool(null);
-        updateActiveView('translator');
+        updateActiveView('translator', { projectId: project.id });
         return;
       }
 
       if (navigateTo === 'voice') {
         setActiveTool(null);
-        updateActiveView('voice');
+        updateActiveView('voice', { projectId: project.id });
         return;
       }
 
@@ -926,7 +992,7 @@ export default function App() {
         navigateTo === 'blur' ||
         navigateTo === 'branding'
       ) {
-        updateActiveView('editor');
+        updateActiveView('editor', { projectId: project.id });
         if (navigateTo === 'captions') {
           handleOpenTool('captions', 'style');
         } else if (navigateTo === 'blur') {
@@ -947,13 +1013,13 @@ export default function App() {
         Boolean(project.workflow?.completedStages?.includes('voice'));
 
       if (alreadyValidated || project.workflow?.completedStages?.includes('editor')) {
-        updateActiveView('editor');
+        updateActiveView('editor', { projectId: project.id });
         setActiveTool(null);
       } else if (ready.translationValid) {
-        updateActiveView('voice');
+        updateActiveView('voice', { projectId: project.id });
         setActiveTool(null);
       } else {
-        updateActiveView('translator');
+        updateActiveView('translator', { projectId: project.id });
         setActiveTool(null);
       }
     },
@@ -3348,12 +3414,12 @@ export default function App() {
       if (!activeProject) return;
       if (step === 'translator') {
         setActiveTool(null);
-        updateActiveView('translator');
+        updateActiveView('translator', { projectId: activeProject.id });
         return;
       }
       if (step === 'voice') {
         setActiveTool(null);
-        updateActiveView('voice');
+        updateActiveView('voice', { projectId: activeProject.id });
         return;
       }
       if (step === 'editor') {
@@ -3364,7 +3430,9 @@ export default function App() {
           Boolean(activeProject.workflow?.completedStages?.includes('voice'));
         if (!isValidated) {
           setActiveTool(null);
-          updateActiveView(check.translationValid ? 'voice' : 'translator');
+          updateActiveView(check.translationValid ? 'voice' : 'translator', {
+            projectId: activeProject.id,
+          });
           showNotice(
             check.errors[0] ||
               'Complete Translation & Voice Studio and click VALIDATE & CONTINUE TO VIDEO EDITOR first.'
@@ -3372,12 +3440,12 @@ export default function App() {
           return;
         }
         setActiveTool(null);
-        updateActiveView('editor');
+        updateActiveView('editor', { projectId: activeProject.id });
         return;
       }
       if (step === 'export') {
         setActiveTool(null);
-        updateActiveView('export');
+        updateActiveView('export', { projectId: activeProject.id });
         return;
       }
       if (step === 'styles') {
@@ -3400,19 +3468,20 @@ export default function App() {
                 videoRef.current?.pause();
                 setActiveTool(null);
                 if (activeView === 'settings') {
-                  setActiveView(
+                  updateActiveView(
                     settingsReturnView !== 'projects' && !activeProject
                       ? 'projects'
-                      : settingsReturnView
+                      : settingsReturnView,
+                    { projectId: activeProject?.id }
                   );
                 } else if (activeView === 'export') {
-                  setActiveView('editor');
+                  updateActiveView('editor', { projectId: activeProject?.id });
                 } else if (activeView === 'editor') {
-                  setActiveView('voice');
+                  updateActiveView('voice', { projectId: activeProject?.id });
                 } else if (activeView === 'voice') {
-                  setActiveView('translator');
+                  updateActiveView('translator', { projectId: activeProject?.id });
                 } else {
-                  setActiveView('projects');
+                  updateActiveView('projects');
                 }
               }}
               className="min-w-[38px] min-h-[38px] p-1.5 rounded-xl text-zinc-200 hover:text-white hover:bg-white/[0.06] flex items-center justify-center cursor-pointer shrink-0"
@@ -3448,7 +3517,7 @@ export default function App() {
             onClick={() => {
               videoRef.current?.pause();
               setActiveTool(null);
-              setActiveView('projects');
+              updateActiveView('projects');
             }}
             className="flex items-center gap-1.5 text-sm sm:text-base font-display font-bold tracking-tight whitespace-nowrap cursor-pointer"
           >
@@ -3546,7 +3615,7 @@ export default function App() {
                 videoRef.current?.pause();
                 setActiveTool(null);
                 setMoreMenuOpen(false);
-                setActiveView('export');
+                updateActiveView('export', { projectId: activeProject.id });
               }}
               disabled={!activeProject.sourceVideoUrl && !activeProject.sourceVideoBlobKey}
               className="min-h-[38px] px-3 sm:px-4 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-xs sm:text-sm font-semibold text-white flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer shadow-lg shadow-violet-600/25"
@@ -3559,7 +3628,7 @@ export default function App() {
           {activeView === 'export' && activeProject && (
             <button
               type="button"
-              onClick={() => setActiveView('editor')}
+              onClick={() => updateActiveView('editor', { projectId: activeProject.id })}
               className="min-h-[38px] px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-white/[0.08] text-xs font-semibold text-zinc-200 whitespace-nowrap shrink-0 cursor-pointer"
             >
               Back to Editor
@@ -3570,10 +3639,11 @@ export default function App() {
             type="button"
             onClick={() => {
               if (activeView === 'settings') {
-                setActiveView(
+                updateActiveView(
                   settingsReturnView !== 'projects' && !activeProject
                     ? 'projects'
-                    : settingsReturnView
+                    : settingsReturnView,
+                  { projectId: activeProject?.id }
                 );
               } else {
                 openSettingsPage();
@@ -3667,7 +3737,23 @@ export default function App() {
             onNotice={showNotice}
           />
         </main>
-      ) : activeView === 'projects' || !activeProject ? (
+      ) : activeView === 'styles' ? (
+        <main className="flex-1 min-h-0 overflow-y-auto">
+          <SavedStylesPage
+            activeProject={activeProject}
+            onProjectUpdated={handleProjectUpdated}
+            onOpenSaveStyleDialog={() => setSaveStyleModalOpen(true)}
+            onNavigate={(page) => {
+              if (activeProject) {
+                handleSelectProject(activeProject, page);
+              } else {
+                updateActiveView(page === 'dashboard' ? 'projects' : (page as AppView));
+              }
+            }}
+            onNotice={showNotice}
+          />
+        </main>
+      ) : activeView === 'projects' ? (
         <main className="flex-1 min-h-0 overflow-y-auto">
           <DashboardPage
             projects={projects}
@@ -3680,6 +3766,32 @@ export default function App() {
             pendingSyncProjectIds={new Set(pendingOps.map((p) => p.projectId))}
           />
         </main>
+      ) : !activeProject ? (
+        <main className="flex-1 min-h-0 flex items-center justify-center p-6 bg-[#09090B]">
+          <div className="max-w-md w-full p-8 rounded-2xl bg-[#111115] border border-white/[0.08] text-center space-y-4 shadow-2xl">
+            <div className="w-12 h-12 rounded-xl bg-violet-600/20 border border-violet-500/30 flex items-center justify-center mx-auto text-violet-400">
+              <Film className="w-6 h-6" />
+            </div>
+            <div>
+              <h2 className="text-base font-display font-bold text-white">
+                No Video Project Selected
+              </h2>
+              <p className="text-xs text-zinc-400 mt-1 leading-relaxed">
+                Choose an existing project or import a new video to continue in{' '}
+                <span className="text-zinc-200 font-semibold capitalize">{activeView}</span>.
+              </p>
+            </div>
+            <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => updateActiveView('projects')}
+                className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-xs font-semibold text-white transition-colors cursor-pointer"
+              >
+                Go to Projects &amp; Import
+              </button>
+            </div>
+          </div>
+        </main>
       ) : activeView === 'translator' ? (
         <main className="flex-1 min-h-0 overflow-y-auto">
           <TranslatorPage
@@ -3688,7 +3800,7 @@ export default function App() {
             focusAudioOverflowSignal={focusTranslationOverflowSignal}
             onContinueToVoice={(updatedProject) => {
               handleProjectUpdated(updatedProject);
-              setActiveView('voice');
+              updateActiveView('voice', { projectId: updatedProject.id });
             }}
           />
         </main>
@@ -3708,16 +3820,6 @@ export default function App() {
               handleSelectProject(activeProject, page);
             }}
             onValidatedContinue={handleValidatedContinue}
-          />
-        </main>
-      ) : activeView === 'styles' ? (
-        <main className="flex-1 min-h-0 overflow-y-auto">
-          <SavedStylesPage
-            activeProject={activeProject}
-            onProjectUpdated={handleProjectUpdated}
-            onOpenSaveStyleDialog={() => setSaveStyleModalOpen(true)}
-            onNavigate={(page) => handleSelectProject(activeProject, page)}
-            onNotice={showNotice}
           />
         </main>
       ) : activeView === 'export' ? (
