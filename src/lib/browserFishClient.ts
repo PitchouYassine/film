@@ -17,8 +17,10 @@ import {
   DEFAULT_FISH_API_BASE,
   DEFAULT_FISH_TTS_MODEL,
   normalizeAndValidateFishReferenceId,
+  normalizeFishApiKey,
   sanitizeFishErrorText,
 } from './fishReference';
+import { recordFishAuthStatus } from './fishAudioKeyManager';
 
 function resolveProxyUrl(path: string): string {
   const base = (
@@ -361,7 +363,7 @@ export async function synthesizeFishTtsViaProxy(
   apiKey: string,
   params: { text: string; referenceId?: string }
 ): Promise<{ blob: Blob; durationSec: number }> {
-  const cleanKey = apiKey.trim();
+  const cleanKey = normalizeFishApiKey(apiKey);
   if (!cleanKey) {
     throw new Error('Fish Audio API key is not configured. Add your key in Settings first.');
   }
@@ -421,7 +423,7 @@ export async function synthesizeFishTtsViaProxy(
 
   if (!res.ok) {
     const resText = await res.text().catch(() => '');
-    const sanitizedBody = sanitizeFishErrorText(resText);
+    const sanitizedBody = sanitizeFishErrorText(resText, cleanKey);
     console.warn('[Fish TTS] Error response', {
       requestUrl: activeRequestUrl,
       responseUrl,
@@ -455,20 +457,22 @@ export async function synthesizeFishTtsViaProxy(
       const detail = sanitizeFishErrorText(
         (typeof parsed?.error === 'string' && parsed.error) ||
           (typeof parsed?.message === 'string' && parsed.message) ||
-          resText
+          resText,
+        cleanKey
       );
-      throw new Error(
-        `Fish Audio authentication failed (HTTP ${res.status}): Check your API key in Settings.${
-          detail ? ` Response body: ${detail}` : ''
-        }`
-      );
+      const authErrMsg = `Fish Audio authentication failed (HTTP ${res.status}): ${
+        detail || 'Invalid Token'
+      }. Please generate a new API key from Fish Audio, then open Settings and click Clear & Re-enter API Key.`;
+      await recordFishAuthStatus('error', authErrMsg);
+      throw new Error(authErrMsg);
     }
 
     const rawErr = sanitizeFishErrorText(
       (typeof parsed?.error === 'string' && parsed.error) ||
         (typeof parsed?.message === 'string' && parsed.message) ||
         resText ||
-        `Fish Audio TTS request failed (HTTP ${res.status}).`
+        `Fish Audio TTS request failed (HTTP ${res.status}).`,
+      cleanKey
     );
     throw new Error(rawErr || `Fish Audio TTS request failed (HTTP ${res.status}).`);
   }
@@ -483,7 +487,10 @@ export async function synthesizeFishTtsViaProxy(
   const contentType = (res.headers.get('content-type') || 'audio/mpeg').toLowerCase();
   const audioBuffer = await res.arrayBuffer();
   if (contentType.includes('text/html') || contentType.includes('application/json')) {
-    const snippet = sanitizeFishErrorText(new TextDecoder().decode(audioBuffer.slice(0, 400)));
+    const snippet = sanitizeFishErrorText(
+      new TextDecoder().decode(audioBuffer.slice(0, 400)),
+      cleanKey
+    );
     throw new Error(
       `Fish Audio TTS proxy returned non-audio content (${contentType}): ${snippet || 'Unexpected response'}`
     );
@@ -495,6 +502,7 @@ export async function synthesizeFishTtsViaProxy(
     throw new Error('Fish Audio TTS returned an empty audio stream.');
   }
 
+  await recordFishAuthStatus('connected', null);
   const durationSec = await measureAudioBlobDuration(blob, text);
   return { blob, durationSec };
 }
@@ -537,10 +545,15 @@ export async function transcribeWithFishViaProxy(
   formData.append('ignore_timestamps', 'false');
   if (isoLang) formData.append('language', isoLang);
 
+  const cleanAsrKey = normalizeFishApiKey(apiKey);
+  if (!cleanAsrKey) {
+    throw new Error('Fish Audio API key is not configured. Add your key in Settings first.');
+  }
+
   const res = await fetch(resolveProxyUrl('/api/fish/proxy/asr'), {
     method: 'POST',
     headers: {
-      'X-Fish-Api-Key': apiKey.trim(),
+      'X-Fish-Api-Key': cleanAsrKey,
     },
     body: formData,
   });

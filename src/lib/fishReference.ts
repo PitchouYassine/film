@@ -40,10 +40,53 @@ export function normalizeAndValidateFishReferenceId(raw?: string | null): string
   return trimmed;
 }
 
-export function sanitizeFishErrorText(raw: string): string {
-  return (raw || '')
+export function normalizeFishApiKey(raw?: unknown): string {
+  if (typeof raw !== 'string') return '';
+  // Remove invisible control/zero-width/NBSP/newline characters from copy-paste
+  let cleaned = raw
+    .replace(/[\r\n\t\u200B-\u200D\uFEFF\u00A0]/g, '')
+    .trim();
+
+  // Strip accidental "Authorization:" or "FISH_API_KEY=" env/header prefixes
+  cleaned = cleaned
+    .replace(/^authorization\s*:\s*/i, '')
+    .replace(/^fish_api_key\s*=\s*/i, '')
+    .trim();
+
+  // Strip matching surrounding quotes ('...', "...", `...`)
+  for (let i = 0; i < 2; i++) {
+    if (
+      (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+      (cleaned.startsWith("'") && cleaned.endsWith("'")) ||
+      (cleaned.startsWith('`') && cleaned.endsWith('`'))
+    ) {
+      cleaned = cleaned.slice(1, -1).trim();
+    }
+  }
+
+  // Strip one or more accidental "Bearer " prefixes so only a single Bearer prefix is ever sent
+  while (/^bearer\s+/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^bearer\s+/i, '').trim();
+  }
+
+  // Strip surrounding quotes again in case user pasted Bearer "token"
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+
+  if (!cleaned || cleaned === 'MY_FISH_API_KEY') return '';
+  return cleaned;
+}
+
+export function sanitizeFishErrorText(raw: string, secretToRedact?: string): string {
+  let out = (raw || '')
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
-    .replace(/(x-fish-api-key\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]')
-    .trim()
-    .slice(0, 400);
+    .replace(/(x-fish-api-key\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]');
+  if (secretToRedact && secretToRedact.trim().length >= 4) {
+    out = out.split(secretToRedact.trim()).join('[REDACTED]');
+  }
+  return out.trim().slice(0, 400);
 }

@@ -10,12 +10,43 @@ function normalizeFishBase(raw?: string | null): string {
   return cleaned || DEFAULT_FISH_API_BASE;
 }
 
-function sanitizeText(raw: string): string {
-  return (raw || '')
+function normalizeApiKey(raw?: unknown): string {
+  if (typeof raw !== 'string') return '';
+  let cleaned = raw.replace(/[\r\n\t\u200B-\u200D\uFEFF\u00A0]/g, '').trim();
+  cleaned = cleaned
+    .replace(/^authorization\s*:\s*/i, '')
+    .replace(/^fish_api_key\s*=\s*/i, '')
+    .trim();
+  for (let i = 0; i < 2; i++) {
+    if (
+      (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+      (cleaned.startsWith("'") && cleaned.endsWith("'")) ||
+      (cleaned.startsWith('`') && cleaned.endsWith('`'))
+    ) {
+      cleaned = cleaned.slice(1, -1).trim();
+    }
+  }
+  while (/^bearer\s+/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^bearer\s+/i, '').trim();
+  }
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  if (!cleaned || cleaned === 'MY_FISH_API_KEY') return '';
+  return cleaned;
+}
+
+function sanitizeText(raw: string, secretToRedact?: string): string {
+  let out = (raw || '')
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
-    .replace(/(x-fish-api-key\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]')
-    .trim()
-    .slice(0, 400);
+    .replace(/(x-fish-api-key\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]');
+  if (secretToRedact && secretToRedact.trim().length >= 4) {
+    out = out.split(secretToRedact.trim()).join('[REDACTED]');
+  }
+  return out.trim().slice(0, 400);
 }
 
 async function readRawBody(req: IncomingMessage): Promise<Buffer> {
@@ -57,9 +88,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   try {
     const rawHeaderKey = req.headers['x-fish-api-key'];
-    const headerKey = typeof rawHeaderKey === 'string' ? rawHeaderKey.trim() : '';
-    const apiKey = headerKey || (process.env.FISH_API_KEY?.trim() || '');
-    if (!apiKey || apiKey === 'MY_FISH_API_KEY') {
+    const hasHeaderKey = rawHeaderKey !== undefined;
+    const headerKey = typeof rawHeaderKey === 'string' ? normalizeApiKey(rawHeaderKey) : '';
+    const apiKey = hasHeaderKey ? headerKey : normalizeApiKey(process.env.FISH_API_KEY);
+    if (!apiKey) {
       sendJson(res, 401, { error: 'Fish Audio API key is required.' });
       return;
     }

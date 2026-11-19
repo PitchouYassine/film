@@ -4,8 +4,14 @@ import {
   FishVoiceModel,
 } from '../types/studio';
 import { idbGet, idbSet, idbDelete } from './browserStorage';
+import {
+  DEFAULT_FISH_API_BASE,
+  DEFAULT_FISH_TTS_MODEL,
+  normalizeFishApiKey,
+  sanitizeFishErrorText,
+} from './fishReference';
 
-const FISH_API_BASE = 'https://api.fish.audio';
+const FISH_API_BASE = DEFAULT_FISH_API_BASE;
 const STORE_NAME = 'appSettings';
 const KEY_NAME = 'fishAudioApiKey';
 const META_KEY_NAME = 'fishAudioConnectionMeta';
@@ -48,13 +54,34 @@ async function isIndexedDbReady(): Promise<boolean> {
 
 export async function getStoredFishApiKey(): Promise<string> {
   try {
-    const entry = await idbGet<string | { key?: string; value?: string }>(STORE_NAME, KEY_NAME);
+    const entry = await idbGet<string | { key?: string; value?: string; apiKey?: string }>(
+      STORE_NAME,
+      KEY_NAME
+    );
     if (!entry) return '';
-    if (typeof entry === 'string') return entry.trim();
-    if (typeof entry === 'object' && typeof entry.value === 'string') return entry.value.trim();
+    if (typeof entry === 'string') return normalizeFishApiKey(entry);
+    if (typeof entry === 'object') {
+      if (typeof entry.value === 'string') return normalizeFishApiKey(entry.value);
+      if (typeof entry.apiKey === 'string') return normalizeFishApiKey(entry.apiKey);
+    }
     return '';
   } catch {
     return '';
+  }
+}
+
+export async function recordFishAuthStatus(
+  connectionStatus: FishConnectionStatus,
+  lastError: string | null = null
+): Promise<void> {
+  try {
+    await idbSet(STORE_NAME, META_KEY_NAME, {
+      connectionStatus,
+      lastCheckedAt: new Date().toISOString(),
+      lastError,
+    } satisfies LocalConnectionMeta);
+  } catch {
+    // Ignore IDB metadata update failures
   }
 }
 
@@ -89,19 +116,29 @@ export async function getFishAudioSettingsSummary(): Promise<FishAudioSettingsSu
       ? 'Stored locally in your browser (IndexedDB). Local IndexedDB storage is unencrypted and is not equivalent to encrypted server-side secret storage. Your key remains on this device and is never sent to any database, analytics service, or third-party storage.'
       : 'Browser IndexedDB storage is unavailable or blocked in this browsing context.',
     connectionStatus,
-    lastCheckedAt: meta?.lastCheckedAt || null,
+    lastCheckedAt: isConfigured ? meta?.lastCheckedAt || null : null,
     lastError: isConfigured ? meta?.lastError || null : null,
   };
 }
 
 export async function saveStoredFishApiKey(rawKey: string): Promise<FishAudioSettingsSummary> {
-  const trimmed = (rawKey || '').trim();
-  if (!trimmed || trimmed === 'MY_FISH_API_KEY') {
+  const normalized = normalizeFishApiKey(rawKey);
+  if (!normalized) {
     throw new Error('Please enter a valid Fish Audio API key.');
   }
+  if (/\s/.test(normalized)) {
+    throw new Error(
+      'Invalid Fish Audio API key format: contains internal spaces. Paste only the API key string.'
+    );
+  }
 
-  await idbSet(STORE_NAME, KEY_NAME, trimmed);
+  await idbSet(STORE_NAME, KEY_NAME, normalized);
+  const persisted = await getStoredFishApiKey();
+  if (persisted !== normalized) {
+    throw new Error('Failed to verify saved Fish Audio API key in browser IndexedDB.');
+  }
 
+  // Never claim the key is valid until Fish Audio returns a successful response
   const meta: LocalConnectionMeta = {
     connectionStatus: 'not_connected',
     lastCheckedAt: null,
@@ -118,22 +155,28 @@ export async function deleteStoredFishApiKey(): Promise<FishAudioSettingsSummary
   return getFishAudioSettingsSummary();
 }
 
+function resolveTtsProxyTestUrl(): string {
+  const base = (
+    (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_BASE_URL) ||
+    ''
+  ).replace(/\/+$/, '');
+  return base ? `${base}/api/fish/proxy/tts` : '/api/fish/proxy/tts';
+}
+
 export async function testFishAudioConnection(candidateKey?: string): Promise<{
   ok: boolean;
   connectionStatus: FishConnectionStatus;
   message: string;
   settings: FishAudioSettingsSummary;
 }> {
-  const testingUnsaved = Boolean(candidateKey && candidateKey.trim());
-  const keyToUse = testingUnsaved ? candidateKey!.trim() : await getStoredFishApiKey();
+  const testingUnsaved = candidateKey !== undefined && normalizeFishApiKey(candidateKey).length > 0;
+  const keyToUse = testingUnsaved
+    ? normalizeFishApiKey(candidateKey)
+    : await getStoredFishApiKey();
 
-  if (!keyToUse || keyToUse === 'MY_FISH_API_KEY') {
+  if (!keyToUse) {
     if (!testingUnsaved) {
-      await idbSet(STORE_NAME, META_KEY_NAME, {
-        connectionStatus: 'not_connected',
-        lastCheckedAt: new Date().toISOString(),
-        lastError: 'No Fish Audio API key configured.',
-      }).catch(() => {});
+      await recordFishAuthStatus('not_connected', 'No Fish Audio API key configured.');
     }
     const settings = await getFishAudioSettingsSummary();
     return {
@@ -145,97 +188,115 @@ export async function testFishAudioConnection(candidateKey?: string): Promise<{
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 12000);
+  const timer = setTimeout(() => controller.abort(), 15000);
+
+  const authFailureMsg =
+    'Fish Audio authentication failed (HTTP 401 Invalid Token): Fish Audio rejected this API key. Please generate a new API key in your Fish Audio dashboard, then click "Clear & Re-enter API Key".';
 
   try {
-    // Official Fish Audio API verification endpoint: GET /wallet/self/api-credit with Authorization: Bearer <key>
-    const res = await fetch(`${FISH_API_BASE}/wallet/self/api-credit`, {
-      method: 'GET',
+    const ttsUrl = resolveTtsProxyTestUrl();
+    // Perform minimal TTS test: POST https://api.fish.audio/v1/tts (via CORS proxy),
+    // header model: s2.1-pro-free, body {"text":"Hello from Recap Movies.","format":"mp3"}, no reference_id
+    let res = await fetch(ttsUrl, {
+      method: 'POST',
       headers: {
-        Authorization: `Bearer ${keyToUse}`,
+        'Content-Type': 'application/json',
+        'X-Fish-Api-Key': keyToUse,
+        model: DEFAULT_FISH_TTS_MODEL,
       },
+      body: JSON.stringify({
+        text: 'Hello from Recap Movies.',
+        format: 'mp3',
+      }),
       signal: controller.signal,
     });
 
-    clearTimeout(timer);
+    if (res.status === 404 && ttsUrl !== '/api/fish/proxy/tts' && !res.headers.get('x-fish-proxy')) {
+      res = await fetch('/api/fish/proxy/tts', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Fish-Api-Key': keyToUse,
+          model: DEFAULT_FISH_TTS_MODEL,
+        },
+        body: JSON.stringify({
+          text: 'Hello from Recap Movies.',
+          format: 'mp3',
+        }),
+        signal: controller.signal,
+      });
+    }
 
-    if (res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { credit?: number | string };
-      const creditNote =
-        data.credit !== undefined && data.credit !== null ? ` (Credit: ${data.credit})` : '';
-      const checkedAt = new Date().toISOString();
+    // If proxy route itself returned 404 (not Fish Audio upstream), still verify token via CORS-enabled wallet endpoint
+    if (res.status === 404 && !res.headers.get('x-fish-proxy')) {
+      const walletRes = await fetch(`${FISH_API_BASE}/wallet/self/api-credit`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${keyToUse}`,
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
 
-      if (!testingUnsaved) {
-        await idbSet(STORE_NAME, META_KEY_NAME, {
-          connectionStatus: 'connected',
-          lastCheckedAt: checkedAt,
-          lastError: null,
-        }).catch(() => {});
+      if (walletRes.status === 401 || walletRes.status === 403) {
+        if (!testingUnsaved) await recordFishAuthStatus('error', authFailureMsg);
+        const settings = await getFishAudioSettingsSummary();
+        return { ok: false, connectionStatus: 'error', message: authFailureMsg, settings };
       }
 
+      const proxyMissingMsg =
+        'TTS proxy route (/api/fish/proxy/tts) returned HTTP 404 on this host, so the /v1/tts test could not reach Fish Audio.';
+      if (!testingUnsaved) await recordFishAuthStatus('error', proxyMissingMsg);
+      const settings = await getFishAudioSettingsSummary();
+      return { ok: false, connectionStatus: 'error', message: proxyMissingMsg, settings };
+    }
+
+    if (res.ok) {
+      const ct = (res.headers.get('content-type') || 'audio/mpeg').toLowerCase();
+      const buf = await res.arrayBuffer();
+      clearTimeout(timer);
+
+      if (ct.includes('text/html') || ct.includes('application/json') || buf.byteLength < 128) {
+        const msg = 'Fish Audio TTS test returned an unexpected non-audio response.';
+        if (!testingUnsaved) await recordFishAuthStatus('error', msg);
+        const settings = await getFishAudioSettingsSummary();
+        return { ok: false, connectionStatus: 'error', message: msg, settings };
+      }
+
+      if (!testingUnsaved) await recordFishAuthStatus('connected', null);
       const settings = await getFishAudioSettingsSummary();
       return {
         ok: true,
         connectionStatus: 'connected',
-        message: `Connected successfully to Fish Audio API${creditNote}.`,
+        message: 'Connected & verified with Fish Audio TTS (POST /v1/tts · s2.1-pro-free).',
         settings,
       };
     }
 
-    if (res.status === 401 || res.status === 403) {
-      const message = 'Authentication failed (HTTP 401/403): invalid or expired Fish Audio API key.';
-      if (!testingUnsaved) {
-        await idbSet(STORE_NAME, META_KEY_NAME, {
-          connectionStatus: 'error',
-          lastCheckedAt: new Date().toISOString(),
-          lastError: message,
-        }).catch(() => {});
-      }
-      const settings = await getFishAudioSettingsSummary();
-      return { ok: false, connectionStatus: 'error', message, settings };
-    }
+    clearTimeout(timer);
 
-    if (res.status === 405) {
-      const message =
-        'Fish Audio returned HTTP 405 (Method Not Allowed). This does not mean your API key is invalid; check that the request uses GET /wallet/self/api-credit.';
-      if (!testingUnsaved) {
-        await idbSet(STORE_NAME, META_KEY_NAME, {
-          connectionStatus: 'error',
-          lastCheckedAt: new Date().toISOString(),
-          lastError: message,
-        }).catch(() => {});
-      }
+    if (res.status === 401 || res.status === 403) {
+      if (!testingUnsaved) await recordFishAuthStatus('error', authFailureMsg);
       const settings = await getFishAudioSettingsSummary();
-      return { ok: false, connectionStatus: 'error', message, settings };
+      return { ok: false, connectionStatus: 'error', message: authFailureMsg, settings };
     }
 
     const rawText = await res.text().catch(() => '');
-    const message = `Fish Audio API error (${res.status}): ${rawText.slice(0, 150) || 'Unknown error'}`;
-    if (!testingUnsaved) {
-      await idbSet(STORE_NAME, META_KEY_NAME, {
-        connectionStatus: 'error',
-        lastCheckedAt: new Date().toISOString(),
-        lastError: message,
-      }).catch(() => {});
-    }
+    const safeDetail = sanitizeFishErrorText(rawText, keyToUse);
+    const message = `Fish Audio TTS test failed (HTTP ${res.status}): ${safeDetail || 'Unknown error'}`;
+    if (!testingUnsaved) await recordFishAuthStatus('error', message);
     const settings = await getFishAudioSettingsSummary();
     return { ok: false, connectionStatus: 'error', message, settings };
   } catch (err) {
     clearTimeout(timer);
     const isTimeout = (err as Error)?.name === 'AbortError';
     const message = isTimeout
-      ? 'Connection timed out after 12s while reaching api.fish.audio.'
+      ? 'Connection timed out while verifying Fish Audio TTS (https://api.fish.audio/v1/tts).'
       : err instanceof Error
-      ? err.message
+      ? sanitizeFishErrorText(err.message, keyToUse)
       : 'Network error connecting to Fish Audio API.';
 
-    if (!testingUnsaved) {
-      await idbSet(STORE_NAME, META_KEY_NAME, {
-        connectionStatus: 'error',
-        lastCheckedAt: new Date().toISOString(),
-        lastError: message,
-      }).catch(() => {});
-    }
+    if (!testingUnsaved) await recordFishAuthStatus('error', message);
     const settings = await getFishAudioSettingsSummary();
     return { ok: false, connectionStatus: 'error', message, settings };
   }
@@ -254,10 +315,11 @@ export async function fetchFishVoicesFromBrowser(
     qs.set('language', LANGUAGE_TO_ISO[params.language]);
   }
 
+  const cleanKey = normalizeFishApiKey(apiKey);
   const res = await fetch(`${FISH_API_BASE}/model?${qs.toString()}`, {
     method: 'GET',
     headers: {
-      Authorization: `Bearer ${apiKey.trim()}`,
+      Authorization: `Bearer ${cleanKey}`,
     },
   });
 
@@ -328,7 +390,7 @@ export async function validateFishVoiceInBrowser(
     );
   }
 
-  const key = (apiKey || '').trim();
+  const key = normalizeFishApiKey(apiKey);
   if (!key) {
     return {
       valid: true,

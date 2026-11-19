@@ -20,6 +20,7 @@ import {
   DEFAULT_FISH_TTS_MODEL,
   normalizeAndValidateFishReferenceId,
   normalizeFishApiBaseUrl,
+  normalizeFishApiKey,
   sanitizeFishErrorText,
 } from '../../src/lib/fishReference.ts';
 import type {
@@ -350,8 +351,11 @@ export const onRequest = async (context: {
     }
 
     if (method === 'POST' && pathname === '/api/fish/proxy/tts') {
-      const headerKey = request.headers.get('X-Fish-Api-Key')?.trim();
-      const apiKey = headerKey || (await resolveFishApiKey(env)).apiKey;
+      const hasHeaderKey = request.headers.has('X-Fish-Api-Key');
+      const headerKey = normalizeFishApiKey(request.headers.get('X-Fish-Api-Key'));
+      const apiKey = hasHeaderKey
+        ? headerKey
+        : normalizeFishApiKey((await resolveFishApiKey(env)).apiKey);
       if (!apiKey) {
         return errorJson('Fish Audio API key is required.', 401, request);
       }
@@ -411,7 +415,7 @@ export const onRequest = async (context: {
       };
       if (!upstream.ok) {
         const errText = await upstream.text().catch(() => '');
-        const cleanBody = sanitizeFishErrorText(errText);
+        const cleanBody = sanitizeFishErrorText(errText, apiKey);
         console.warn(
           `[Fish TTS Proxy:CF] Upstream HTTP ${upstream.status} from ${responseUrl}: ${cleanBody}`
         );
@@ -442,8 +446,11 @@ export const onRequest = async (context: {
     }
 
     if (method === 'POST' && pathname === '/api/fish/proxy/asr') {
-      const headerKey = request.headers.get('X-Fish-Api-Key')?.trim();
-      const apiKey = headerKey || (await resolveFishApiKey(env)).apiKey;
+      const hasHeaderKey = request.headers.has('X-Fish-Api-Key');
+      const headerKey = normalizeFishApiKey(request.headers.get('X-Fish-Api-Key'));
+      const apiKey = hasHeaderKey
+        ? headerKey
+        : normalizeFishApiKey((await resolveFishApiKey(env)).apiKey);
       if (!apiKey) {
         return errorJson('Fish Audio API key is required.', 401, request);
       }

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   Archive,
@@ -35,6 +35,7 @@ import {
 } from '../types/studio';
 import { api } from '../lib/api';
 import { getStoredFishApiKey } from '../lib/fishAudioKeyManager';
+import { normalizeFishApiKey } from '../lib/fishReference';
 import { formatBytes } from '../lib/formatters';
 import { MyVoicesManager } from '../components/MyVoicesManager';
 import { MyStylesManager } from '../components/MyStylesManager';
@@ -87,6 +88,7 @@ export function SettingsPage({
   } | null>(null);
 
   // Fish Audio API key state
+  const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [showKeyInput, setShowKeyInput] = useState(false);
   const [revealedSavedKey, setRevealedSavedKey] = useState<string | null>(null);
@@ -162,8 +164,8 @@ export function SettingsPage({
 
   const handleSaveApiKey = async (e: React.FormEvent) => {
     e.preventDefault();
-    const trimmed = apiKeyInput.trim();
-    if (!trimmed) {
+    const cleaned = normalizeFishApiKey(apiKeyInput);
+    if (!cleaned) {
       setFishNotice({ kind: 'error', text: 'Enter your Fish Audio API key first.' });
       return;
     }
@@ -171,15 +173,22 @@ export function SettingsPage({
     setSavingKey(true);
     setFishNotice(null);
     try {
-      const updated = await api.saveFishApiKey(trimmed);
-      setFishSettings(updated);
+      const savedSummary = await api.saveFishApiKey(cleaned);
+      setFishSettings(savedSummary);
       setApiKeyInput('');
       setShowKeyInput(false);
       setRevealedSavedKey(null);
       setEditingKey(false);
+
+      // Immediately verify the saved key from IndexedDB using minimal POST /v1/tts (s2.1-pro-free, no reference_id)
+      setTestingConn(true);
+      const testResult = await api.testFishAudioConnection();
+      setFishSettings(testResult.settings);
       setFishNotice({
-        kind: 'success',
-        text: 'Fish Audio API key saved locally in browser storage (IndexedDB). Click Test Connection to verify access.',
+        kind: testResult.ok ? 'success' : 'error',
+        text: testResult.ok
+          ? `Saved locally in IndexedDB and verified with Fish Audio TTS (s2.1-pro-free).`
+          : `Saved locally in IndexedDB, but verification failed: ${testResult.message}`,
       });
       await api.getSystemStatus().then(setStatus).catch(() => {});
       onSettingsUpdated?.();
@@ -190,6 +199,7 @@ export function SettingsPage({
       });
     } finally {
       setSavingKey(false);
+      setTestingConn(false);
     }
   };
 
@@ -197,7 +207,10 @@ export function SettingsPage({
     setTestingConn(true);
     setFishNotice(null);
     try {
-      const typedCandidate = editingKey && apiKeyInput.trim() ? apiKeyInput.trim() : undefined;
+      const typedCandidate =
+        editingKey && normalizeFishApiKey(apiKeyInput)
+          ? normalizeFishApiKey(apiKeyInput)
+          : undefined;
       const result = await api.testFishAudioConnection(typedCandidate);
       setFishSettings(result.settings);
       setFishNotice({
@@ -212,6 +225,29 @@ export function SettingsPage({
       });
     } finally {
       setTestingConn(false);
+    }
+  };
+
+  const handleClearAndReenterKey = async () => {
+    setRemovingKey(true);
+    setFishNotice(null);
+    try {
+      const updated = await api.deleteFishApiKey();
+      setFishSettings(updated);
+      setApiKeyInput('');
+      setShowKeyInput(false);
+      setRevealedSavedKey(null);
+      setEditingKey(true);
+      await api.getSystemStatus().then(setStatus).catch(() => {});
+      onSettingsUpdated?.();
+      setTimeout(() => apiKeyInputRef.current?.focus(), 0);
+    } catch (err) {
+      setFishNotice({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Failed to clear API key.',
+      });
+    } finally {
+      setRemovingKey(false);
     }
   };
 
@@ -274,12 +310,14 @@ export function SettingsPage({
   };
 
   const connStatus = fishSettings?.connectionStatus ?? 'not_connected';
-  const statusInfo =
-    connStatus === 'connected'
-      ? { label: 'Connected', cls: 'border-emerald-500/35 text-emerald-300 bg-emerald-500/10', Icon: CheckCircle2 }
-      : connStatus === 'error'
-      ? { label: 'Error', cls: 'border-red-500/35 text-red-300 bg-red-500/10', Icon: AlertCircle }
-      : { label: 'Not Connected', cls: 'border-white/[0.1] text-zinc-300 bg-zinc-900', Icon: AlertCircle };
+  const isConfigured = Boolean(fishSettings?.configured);
+  const statusInfo = !isConfigured
+    ? { label: 'Not configured', cls: 'border-white/[0.1] text-zinc-300 bg-zinc-900', Icon: AlertCircle }
+    : connStatus === 'connected'
+    ? { label: 'Connected', cls: 'border-emerald-500/35 text-emerald-300 bg-emerald-500/10', Icon: CheckCircle2 }
+    : connStatus === 'error'
+    ? { label: 'Authentication failed', cls: 'border-red-500/35 text-red-300 bg-red-500/10', Icon: AlertCircle }
+    : { label: 'Saved locally', cls: 'border-amber-500/35 text-amber-300 bg-amber-500/10', Icon: KeyRound };
   const StatusIcon = statusInfo.Icon;
 
   return (
@@ -388,7 +426,7 @@ export function SettingsPage({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <button
                     type="button"
                     onClick={() => void handleToggleEditKey()}
@@ -396,6 +434,16 @@ export function SettingsPage({
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
                     <span>{editingKey ? 'Cancel Edit' : 'Edit API Key'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleClearAndReenterKey()}
+                    disabled={removingKey}
+                    className="min-h-[36px] px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/25 text-xs font-medium text-amber-200 flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-40"
+                  >
+                    <KeyRound className="w-3.5 h-3.5" />
+                    <span>Clear &amp; Re-enter API Key</span>
                   </button>
 
                   {(fishSettings.source === 'local_storage' ||
@@ -430,12 +478,15 @@ export function SettingsPage({
                   <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
                     <div className="relative flex-1 min-w-[200px]">
                       <input
+                        ref={apiKeyInputRef}
                         id="fish-api-key-input"
                         type={showKeyInput ? 'text' : 'password'}
                         value={apiKeyInput}
                         onChange={(e) => setApiKeyInput(e.target.value)}
                         placeholder="Paste your Fish Audio API key..."
                         autoComplete="off"
+                        autoCapitalize="none"
+                        autoCorrect="off"
                         spellCheck={false}
                         disabled={Boolean(fishSettings && !fishSettings.secureStorageAvailable)}
                         className="w-full min-h-[38px] bg-[#18181D] border border-white/[0.1] rounded-lg pl-3 pr-10 py-2 text-xs font-mono text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-violet-500 disabled:opacity-50"
@@ -455,13 +506,14 @@ export function SettingsPage({
                       type="submit"
                       disabled={
                         savingKey ||
-                        !apiKeyInput.trim() ||
+                        testingConn ||
+                        !normalizeFishApiKey(apiKeyInput) ||
                         Boolean(fishSettings && !fishSettings.secureStorageAvailable)
                       }
                       className="min-h-[38px] px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-xs font-semibold text-white flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      {savingKey && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                      <span>Save API Key</span>
+                      {(savingKey || testingConn) && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                      <span>{testingConn ? 'Saving & Verifying...' : 'Save & Test Key'}</span>
                     </button>
                   </div>
                 </div>
@@ -479,10 +531,22 @@ export function SettingsPage({
             </div>
 
             <div className="flex flex-wrap items-center justify-end gap-3 pt-1">
+              {fishSettings?.configured && (
+                <button
+                  type="button"
+                  onClick={() => void handleClearAndReenterKey()}
+                  disabled={removingKey || testingConn}
+                  className="min-h-[36px] px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 border border-white/[0.08] text-xs font-medium text-amber-200 flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>Clear &amp; Re-enter API Key</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => void handleTestConnection()}
-                disabled={testingConn || (!fishSettings?.configured && !apiKeyInput.trim())}
+                disabled={testingConn || (!fishSettings?.configured && !normalizeFishApiKey(apiKeyInput))}
                 className="min-h-[36px] px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 border border-white/[0.08] text-xs font-medium text-zinc-100 flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
               >
                 {testingConn ? (
@@ -490,7 +554,7 @@ export function SettingsPage({
                 ) : (
                   <PlugZap className="w-3.5 h-3.5 text-violet-400" />
                 )}
-                <span>Test Connection</span>
+                <span>Test TTS Connection</span>
               </button>
             </div>
 
@@ -508,7 +572,7 @@ export function SettingsPage({
                 ) : (
                   <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
                 )}
-                <span>{fishNotice ? fishNotice.text : fishSettings?.lastError}</span>
+                <span className="flex-1">{fishNotice ? fishNotice.text : fishSettings?.lastError}</span>
               </div>
             )}
           </StudioCard>
@@ -531,15 +595,25 @@ export function SettingsPage({
                     <div className="text-zinc-500 mt-0.5">Voice synthesis &amp; speech transcription</div>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0 font-medium">
-                    {status.fishConfigured ? (
+                    {connStatus === 'connected' ? (
                       <>
                         <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                        <span className="text-emerald-300">Ready</span>
+                        <span className="text-emerald-300">Connected</span>
+                      </>
+                    ) : connStatus === 'error' ? (
+                      <>
+                        <AlertCircle className="w-4 h-4 text-red-400" />
+                        <span className="text-red-300">Authentication failed</span>
+                      </>
+                    ) : isConfigured || status.fishConfigured ? (
+                      <>
+                        <KeyRound className="w-4 h-4 text-amber-400" />
+                        <span className="text-amber-300">Saved locally</span>
                       </>
                     ) : (
                       <>
                         <AlertCircle className="w-4 h-4 text-amber-400" />
-                        <span className="text-amber-300">Not Configured</span>
+                        <span className="text-amber-300">Not configured</span>
                       </>
                     )}
                   </div>

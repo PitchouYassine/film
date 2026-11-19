@@ -9,6 +9,7 @@ import {
   DEFAULT_FISH_TTS_MODEL,
   normalizeAndValidateFishReferenceId,
   normalizeFishApiBaseUrl,
+  normalizeFishApiKey,
   sanitizeFishErrorText,
 } from './src/lib/fishReference.ts';
 import {
@@ -395,9 +396,13 @@ app.get('/api/fish/voices', async (req, res) => {
 // Stateless Fish Audio TTS/ASR proxies (read X-Fish-Api-Key in-memory only; never log or persist)
 app.post('/api/fish/proxy/tts', async (req, res) => {
   try {
-    const headerKey = typeof req.headers['x-fish-api-key'] === 'string' ? req.headers['x-fish-api-key'].trim() : '';
-    const apiKey = headerKey || (process.env.FISH_API_KEY?.trim() || '');
-    if (!apiKey || apiKey === 'MY_FISH_API_KEY') {
+    const hasHeaderKey = req.headers['x-fish-api-key'] !== undefined;
+    const headerKey =
+      typeof req.headers['x-fish-api-key'] === 'string'
+        ? normalizeFishApiKey(req.headers['x-fish-api-key'])
+        : '';
+    const apiKey = hasHeaderKey ? headerKey : normalizeFishApiKey(process.env.FISH_API_KEY);
+    if (!apiKey) {
       res.status(401).json({ error: 'Fish Audio API key is required.' });
       return;
     }
@@ -459,7 +464,7 @@ app.post('/api/fish/proxy/tts', async (req, res) => {
 
     if (!upstream.ok) {
       const errText = await upstream.text().catch(() => '');
-      const cleanBody = sanitizeFishErrorText(errText);
+      const cleanBody = sanitizeFishErrorText(errText, apiKey);
       const errorCode = upstream.headers.get('x-fish-error-code') || undefined;
       const errorSource = upstream.headers.get('x-fish-error-source') || undefined;
       console.warn(
@@ -487,9 +492,13 @@ app.post('/api/fish/proxy/tts', async (req, res) => {
 
 app.post('/api/fish/proxy/asr', uploadMem.single('audio'), async (req, res) => {
   try {
-    const headerKey = typeof req.headers['x-fish-api-key'] === 'string' ? req.headers['x-fish-api-key'].trim() : '';
-    const apiKey = headerKey || (process.env.FISH_API_KEY?.trim() || '');
-    if (!apiKey || apiKey === 'MY_FISH_API_KEY') {
+    const hasHeaderKey = req.headers['x-fish-api-key'] !== undefined;
+    const headerKey =
+      typeof req.headers['x-fish-api-key'] === 'string'
+        ? normalizeFishApiKey(req.headers['x-fish-api-key'])
+        : '';
+    const apiKey = hasHeaderKey ? headerKey : normalizeFishApiKey(process.env.FISH_API_KEY);
+    if (!apiKey) {
       res.status(401).json({ error: 'Fish Audio API key is required.' });
       return;
     }
