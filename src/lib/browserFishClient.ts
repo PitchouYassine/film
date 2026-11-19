@@ -13,6 +13,23 @@ import {
 } from '../../server/services/timeline_sync_service';
 import { idbGet, idbSet, storeBlobAsset } from './browserStorage';
 import { distributeWordsEvenly } from './workflowStages';
+import {
+  DEFAULT_FISH_API_BASE,
+  DEFAULT_FISH_TTS_MODEL,
+  normalizeAndValidateFishReferenceId,
+  sanitizeFishErrorText,
+} from './fishReference';
+
+function resolveProxyUrl(path: string): string {
+  const base = (
+    (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_BASE_URL) ||
+    (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_BACKEND_URL) ||
+    (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_APP_URL) ||
+    ''
+  ).replace(/\/+$/, '');
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  return base ? `${base}${cleanPath}` : cleanPath;
+}
 
 export async function ensureLocalProject(projectId: string): Promise<Project> {
   const local = await idbGet<Project>('projects', projectId);
@@ -210,6 +227,79 @@ export async function buildMergedDubBlobUrl(
   }
 }
 
+async function buildFishTts404Error(
+  resText: string,
+  parsed: Record<string, unknown> | null,
+  apiKey: string,
+  referenceId?: string
+): Promise<Error> {
+  const rawBody = sanitizeFishErrorText(
+    (typeof parsed?.rawBody === 'string' && parsed.rawBody) ||
+      (typeof parsed?.message === 'string' && parsed.message) ||
+      (typeof parsed?.error === 'string' && parsed.error) ||
+      resText ||
+      'No response body returned.'
+  );
+  const code = typeof parsed?.code === 'string' ? parsed.code : '';
+  const errorCode = typeof parsed?.errorCode === 'string' ? parsed.errorCode : '';
+  const lower = `${code} ${errorCode} ${rawBody}`.toLowerCase();
+
+  // 1. Endpoint / proxy route 404
+  if (
+    code === 'ROUTE_NOT_FOUND' ||
+    errorCode === 'no_route' ||
+    lower.includes('no route serves this path') ||
+    lower.includes('is not available in cloudflare edge runtime') ||
+    lower.includes('<!doctype html') ||
+    lower.includes('<html')
+  ) {
+    return new Error(
+      `Fish Audio TTS failed (HTTP 404 · Incorrect TTS endpoint): The TTS endpoint route was not found. Expected POST https://api.fish.audio/v1/tts via /api/fish/proxy/tts. Response body: ${rawBody}`
+    );
+  }
+
+  // 2. Distinguish invalid/inaccessible reference_id vs invalid model resource
+  if (referenceId) {
+    try {
+      const modelCheck = await fetch(
+        `${DEFAULT_FISH_API_BASE}/model/${encodeURIComponent(referenceId)}`,
+        {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${apiKey}` },
+        }
+      );
+      if (modelCheck.status === 404 || modelCheck.status === 400 || modelCheck.status === 422) {
+        return new Error(
+          `Fish Audio TTS failed (HTTP 404 · Invalid or inaccessible reference_id "${referenceId}"): No accessible voice model exists for this ID. Response body: ${rawBody}`
+        );
+      }
+      if (modelCheck.status === 403) {
+        return new Error(
+          `Fish Audio TTS failed (HTTP 404 · Inaccessible reference_id "${referenceId}"): This private voice model cannot be accessed by your account. Response body: ${rawBody}`
+        );
+      }
+    } catch {
+      // Fall back to response body inspection below
+    }
+
+    if (
+      lower.includes('reference') ||
+      lower.includes('voice') ||
+      lower.includes('speaker') ||
+      lower.includes('not found')
+    ) {
+      return new Error(
+        `Fish Audio TTS failed (HTTP 404 · Invalid or inaccessible reference_id "${referenceId}"): Response body: ${rawBody}`
+      );
+    }
+  }
+
+  // 3. Invalid model resource / model header issue
+  return new Error(
+    `Fish Audio TTS failed (HTTP 404 · Invalid model resource): Model "${DEFAULT_FISH_TTS_MODEL}" or requested resource was not found. Response body: ${rawBody}`
+  );
+}
+
 export async function synthesizeFishTtsViaProxy(
   apiKey: string,
   params: { text: string; referenceId?: string }
@@ -223,38 +313,74 @@ export async function synthesizeFishTtsViaProxy(
     throw new Error('Preview text cannot be empty.');
   }
 
+  const validReferenceId = normalizeAndValidateFishReferenceId(params.referenceId);
+
   const body: Record<string, unknown> = {
     text,
     format: 'mp3',
-    normalize: true,
-    latency: 'balanced',
-    chunk_length: 250,
-    prosody: {
-      speed: 1.0,
-      volume: 0.0,
-    },
   };
-  if (params.referenceId?.trim()) {
-    body.reference_id = params.referenceId.trim();
+  if (validReferenceId) {
+    body.reference_id = validReferenceId;
   }
 
-  const res = await fetch('/api/fish/proxy/tts', {
+  const res = await fetch(resolveProxyUrl('/api/fish/proxy/tts'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-Fish-Api-Key': cleanKey,
-      model: 's2.1-pro-free',
+      model: DEFAULT_FISH_TTS_MODEL,
     },
     body: JSON.stringify(body),
   });
 
   if (!res.ok) {
-    const errPayload = await res.json().catch(() => null) as { error?: string } | null;
-    const msg = errPayload?.error || `Fish Audio TTS request failed (HTTP ${res.status}).`;
-    throw new Error(msg);
+    const resText = await res.text().catch(() => '');
+    let parsed: Record<string, unknown> | null = null;
+    if (resText) {
+      try {
+        parsed = JSON.parse(resText) as Record<string, unknown>;
+      } catch {
+        parsed = null;
+      }
+    }
+
+    if (res.status === 404) {
+      throw await buildFishTts404Error(resText, parsed, cleanKey, validReferenceId);
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      const detail = sanitizeFishErrorText(
+        (typeof parsed?.error === 'string' && parsed.error) ||
+          (typeof parsed?.message === 'string' && parsed.message) ||
+          resText
+      );
+      throw new Error(
+        `Fish Audio authentication failed (HTTP ${res.status}): Check your API key in Settings.${
+          detail ? ` Response body: ${detail}` : ''
+        }`
+      );
+    }
+
+    const rawErr = sanitizeFishErrorText(
+      (typeof parsed?.error === 'string' && parsed.error) ||
+        (typeof parsed?.message === 'string' && parsed.message) ||
+        resText ||
+        `Fish Audio TTS request failed (HTTP ${res.status}).`
+    );
+    throw new Error(rawErr || `Fish Audio TTS request failed (HTTP ${res.status}).`);
   }
 
-  const blob = await res.blob();
+  const contentType = (res.headers.get('content-type') || 'audio/mpeg').toLowerCase();
+  const audioBuffer = await res.arrayBuffer();
+  if (contentType.includes('text/html') || contentType.includes('application/json')) {
+    const snippet = sanitizeFishErrorText(new TextDecoder().decode(audioBuffer.slice(0, 400)));
+    throw new Error(
+      `Fish Audio TTS proxy returned non-audio content (${contentType}): ${snippet || 'Unexpected response'}`
+    );
+  }
+  const blob = new Blob([audioBuffer], {
+    type: contentType.startsWith('audio/') ? contentType : 'audio/mpeg',
+  });
   if (blob.size < 128) {
     throw new Error('Fish Audio TTS returned an empty audio stream.');
   }
@@ -301,7 +427,7 @@ export async function transcribeWithFishViaProxy(
   formData.append('ignore_timestamps', 'false');
   if (isoLang) formData.append('language', isoLang);
 
-  const res = await fetch('/api/fish/proxy/asr', {
+  const res = await fetch(resolveProxyUrl('/api/fish/proxy/asr'), {
     method: 'POST',
     headers: {
       'X-Fish-Api-Key': apiKey.trim(),

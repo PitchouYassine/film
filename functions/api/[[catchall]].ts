@@ -16,6 +16,12 @@ import {
   clampContinuousPauseMs,
   normalizeSyncMode,
 } from '../../server/services/timeline_sync_service.ts';
+import {
+  DEFAULT_FISH_TTS_MODEL,
+  normalizeAndValidateFishReferenceId,
+  normalizeFishApiBaseUrl,
+  sanitizeFishErrorText,
+} from '../../src/lib/fishReference.ts';
 import type {
   CaptionSegment,
   GeneratedVoiceClip,
@@ -349,21 +355,63 @@ export const onRequest = async (context: {
       if (!apiKey) {
         return errorJson('Fish Audio API key is required.', 401, request);
       }
-      const rawBody = await request.text();
-      const fishBase = (env.FISH_API_BASE_URL || 'https://api.fish.audio').replace(/\/+$/, '');
-      const upstream = await fetch(`${fishBase}/v1/tts`, {
+      const reqBody = await readJsonBody<Record<string, unknown>>(request).catch(() => null);
+      if (!reqBody || typeof reqBody !== 'object') {
+        return errorJson('Invalid JSON request body for Fish Audio TTS.', 400, request);
+      }
+      const text = typeof reqBody.text === 'string' ? reqBody.text.trim() : '';
+      if (!text) {
+        return errorJson('TTS text is required.', 400, request);
+      }
+
+      let validRefId: string | undefined;
+      try {
+        validRefId = normalizeAndValidateFishReferenceId(
+          typeof reqBody.reference_id === 'string' ? reqBody.reference_id : undefined
+        );
+      } catch (refErr) {
+        return errorJson(
+          refErr instanceof Error ? refErr.message : 'Invalid reference_id.',
+          400,
+          request
+        );
+      }
+
+      const upstreamPayload: Record<string, unknown> = {
+        ...reqBody,
+        text,
+        format: typeof reqBody.format === 'string' && reqBody.format ? reqBody.format : 'mp3',
+      };
+      if (validRefId) {
+        upstreamPayload.reference_id = validRefId;
+      } else {
+        delete upstreamPayload.reference_id;
+      }
+
+      const fishBase = normalizeFishApiBaseUrl(env.FISH_API_BASE_URL);
+      const ttsEndpoint = `${fishBase}/v1/tts`;
+      const modelHeader = request.headers.get('model')?.trim() || DEFAULT_FISH_TTS_MODEL;
+      const upstream = await fetch(ttsEndpoint, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
-          model: request.headers.get('model') || 's2.1-pro-free',
+          model: modelHeader,
         },
-        body: rawBody,
+        body: JSON.stringify(upstreamPayload),
       });
       if (!upstream.ok) {
         const errText = await upstream.text().catch(() => '');
-        return errorJson(
-          errText.slice(0, 220) || `Fish Audio TTS error (${upstream.status})`,
+        const cleanBody = sanitizeFishErrorText(errText);
+        return jsonResponse(
+          {
+            error: cleanBody || `Fish Audio TTS error (${upstream.status})`,
+            rawBody: cleanBody,
+            status: upstream.status,
+            errorCode: upstream.headers.get('x-fish-error-code') || undefined,
+            errorSource: upstream.headers.get('x-fish-error-source') || undefined,
+            endpoint: ttsEndpoint,
+          },
           upstream.status,
           request
         );
@@ -385,7 +433,7 @@ export const onRequest = async (context: {
         return errorJson('Fish Audio API key is required.', 401, request);
       }
       const formData = await request.formData();
-      const fishBase = (env.FISH_API_BASE_URL || 'https://api.fish.audio').replace(/\/+$/, '');
+      const fishBase = normalizeFishApiBaseUrl(env.FISH_API_BASE_URL);
       const upstream = await fetch(`${fishBase}/v1/asr`, {
         method: 'POST',
         headers: {

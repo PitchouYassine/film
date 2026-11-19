@@ -46,10 +46,15 @@ import {
   resolveFishApiKey,
   setFishConnectionMeta,
 } from './secrets_service.ts';
+import {
+  DEFAULT_FISH_TTS_MODEL,
+  normalizeAndValidateFishReferenceId,
+  normalizeFishApiBaseUrl,
+} from '../../src/lib/fishReference.ts';
 
 const execFileAsync = promisify(execFile);
 
-const FISH_API_BASE = (process.env.FISH_API_BASE_URL || 'https://api.fish.audio').replace(/\/+$/, '');
+const FISH_API_BASE = normalizeFishApiBaseUrl(process.env.FISH_API_BASE_URL);
 
 const LANGUAGE_TO_ISO: Record<string, string> = {
   English: 'en',
@@ -573,18 +578,21 @@ async function synthesizeFishMp3Buffer(params: {
   maxAttempts?: number;
 }): Promise<Buffer> {
   const apiKey = getFishApiKey();
+  let refId: string | undefined;
+  try {
+    refId = normalizeAndValidateFishReferenceId(params.referenceId);
+  } catch (err) {
+    const valErr = new Error(err instanceof Error ? err.message : 'Invalid reference_id.') as Error & {
+      statusCode?: number;
+    };
+    valErr.statusCode = 400;
+    throw valErr;
+  }
+
   const body: Record<string, unknown> = {
     text: params.text,
     format: 'mp3',
-    normalize: true,
-    latency: 'balanced',
-    chunk_length: 250,
-    prosody: {
-      speed: 1.0,
-      volume: 0.0,
-    },
   };
-  const refId = params.referenceId?.trim() || undefined;
   if (refId) {
     body.reference_id = refId;
   }
@@ -599,7 +607,7 @@ async function synthesizeFishMp3Buffer(params: {
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
-          model: 's2.1-pro-free',
+          model: DEFAULT_FISH_TTS_MODEL,
         },
         body: payloadStr,
       }),
@@ -608,7 +616,17 @@ async function synthesizeFishMp3Buffer(params: {
     );
   } catch (err) {
     const status = (err as { statusCode?: number })?.statusCode;
-    if (refId && (status === 400 || status === 404 || status === 422)) {
+    if (status === 404) {
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      const err404 = new Error(
+        refId
+          ? `Fish Audio TTS failed (HTTP 404 · Invalid or inaccessible reference_id "${refId}" or resource): ${rawMsg}`
+          : `Fish Audio TTS failed (HTTP 404 · Incorrect TTS endpoint or invalid model resource "${DEFAULT_FISH_TTS_MODEL}"): ${rawMsg}`
+      ) as Error & { statusCode?: number };
+      err404.statusCode = 404;
+      throw err404;
+    }
+    if (refId && (status === 400 || status === 422)) {
       const rawMsg = err instanceof Error ? err.message : String(err);
       const refErr = new Error(
         `Selected Fish Audio Voice ID "${refId}" is invalid or unavailable (${rawMsg}). Please pick a valid narrator in Settings → My Voices.`

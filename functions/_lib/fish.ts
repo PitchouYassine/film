@@ -9,6 +9,12 @@ import {
 import { parseMp3DurationSeconds } from './mp3.ts';
 import { saveBinaryAsset } from './storage.ts';
 import { Env, HttpError } from './types.ts';
+import {
+  DEFAULT_FISH_TTS_MODEL,
+  normalizeAndValidateFishReferenceId,
+  normalizeFishApiBaseUrl,
+  sanitizeFishErrorText,
+} from '../../src/lib/fishReference.ts';
 
 const LANGUAGE_TO_ISO: Record<string, string> = {
   English: 'en',
@@ -23,7 +29,7 @@ const LANGUAGE_TO_ISO: Record<string, string> = {
 };
 
 function getFishApiBase(env: Env): string {
-  return (env.FISH_API_BASE_URL || 'https://api.fish.audio').replace(/\/+$/, '');
+  return normalizeFishApiBaseUrl(env.FISH_API_BASE_URL);
 }
 
 async function fetchFish(
@@ -41,12 +47,17 @@ async function fetchFish(
     });
     if (!res.ok) {
       const rawText = await res.text().catch(() => '');
+      const cleanRaw = sanitizeFishErrorText(rawText);
       let msg = `Fish Audio API error (${res.status})`;
       try {
         const parsed = JSON.parse(rawText) as { message?: string; detail?: string; error?: string };
-        msg = parsed.message || parsed.detail || parsed.error || msg;
+        const extracted = parsed.message || parsed.detail || parsed.error;
+        msg = extracted ? `${msg}: ${sanitizeFishErrorText(extracted)}` : msg;
       } catch {
-        if (rawText.trim()) msg = `${msg}: ${rawText.trim().slice(0, 220)}`;
+        if (cleanRaw) msg = `${msg}: ${cleanRaw}`;
+      }
+      if (cleanRaw && !msg.includes(cleanRaw)) {
+        msg = `${msg} (${cleanRaw})`;
       }
       throw new HttpError(msg, res.status >= 400 && res.status < 500 ? res.status : 502);
     }
@@ -303,34 +314,52 @@ export async function synthesizeFishSpeech(
   storedIn: 'r2' | 'd1' | 'client-only';
 }> {
   const apiKey = await requireFishKey(env);
+  let refId: string | undefined;
+  try {
+    refId = normalizeAndValidateFishReferenceId(params.referenceId);
+  } catch (err) {
+    throw new HttpError(err instanceof Error ? err.message : 'Invalid reference_id.', 400);
+  }
+
   const body: Record<string, unknown> = {
     text: params.text,
     format: 'mp3',
-    normalize: true,
-    latency: 'balanced',
-    chunk_length: 250,
-    prosody: {
-      speed: 1.0,
-      volume: 0.0,
-    },
   };
-  const refId = params.referenceId?.trim() || undefined;
   if (refId) body.reference_id = refId;
 
-  const res = await fetchFish(
-    env,
-    '/v1/tts',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        model: 's2.1-pro-free',
+  let res: Response;
+  try {
+    res = await fetchFish(
+      env,
+      '/v1/tts',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          model: DEFAULT_FISH_TTS_MODEL,
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    },
-    55000
-  );
+      55000
+    );
+  } catch (err) {
+    const status = (err as { statusCode?: number })?.statusCode;
+    if (status === 404) {
+      const detail = err instanceof Error ? err.message : String(err);
+      if (refId) {
+        throw new HttpError(
+          `Fish Audio TTS failed (HTTP 404 · Invalid or inaccessible reference_id "${refId}" or resource): ${detail}`,
+          404
+        );
+      }
+      throw new HttpError(
+        `Fish Audio TTS failed (HTTP 404 · Incorrect TTS endpoint or invalid model resource "${DEFAULT_FISH_TTS_MODEL}"): ${detail}`,
+        404
+      );
+    }
+    throw err;
+  }
 
   const bytes = new Uint8Array(await res.arrayBuffer());
   if (bytes.byteLength < 128) {
