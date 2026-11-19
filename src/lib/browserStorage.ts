@@ -1,4 +1,5 @@
 import { Project, StudioPreset, DefaultStudioPreferences, SavedFishVoice, SavedFontAsset, RenderJob, FilmstripFrame } from '../types/studio';
+import { indexedDbStore } from './indexedDbStore';
 
 export const DB_NAME = 'recap_studio_local_db';
 export const CURRENT_SCHEMA_VERSION = 6;
@@ -285,24 +286,324 @@ export async function idbList<T>(storeName: string): Promise<T[]> {
   });
 }
 
+export async function idbListRawEntries(
+  storeName: string
+): Promise<Array<{ key: string; id: string; value: unknown }>> {
+  const db = await getEnsureStoreDb(storeName);
+  return new Promise((resolve, reject) => {
+    try {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const req = store.getAll();
+      req.onerror = () => {
+        console.error(`[IndexedDB Error] idbListRawEntries failed on store "${storeName}":`, req.error);
+        reject(req.error);
+      };
+      req.onsuccess = () => {
+        const results = (req.result || []) as any[];
+        resolve(
+          results.map((r) => ({
+            key: typeof r?.key === 'string' ? r.key : typeof r?.id === 'string' ? r.id : '',
+            id: typeof r?.id === 'string' ? r.id : typeof r?.key === 'string' ? r.key : '',
+            value: r && typeof r === 'object' && 'value' in r && Object.keys(r).length <= 3 ? r.value : r,
+          }))
+        );
+      };
+    } catch (err) {
+      console.error(
+        `[IndexedDB Error] Failed to create readonly transaction on store "${storeName}" (DB version ${db.version}):`,
+        err
+      );
+      reject(err);
+    }
+  });
+}
+
 // Blob asset storage for local media
 const blobUrls = new Map<string, string>();
 
+export function buildProjectVideoBlobKey(projectId: string | undefined, filename: string): string {
+  const safeName = filename || 'video.mp4';
+  return projectId ? `video_${projectId}_${Date.now()}_${safeName}` : `video_${Date.now()}_${safeName}`;
+}
+
+export function inferVideoMimeType(filename?: string | null, existingType?: string | null): string {
+  const trimmed = (existingType || '').trim().toLowerCase();
+  if (trimmed.startsWith('video/')) return trimmed;
+  const lower = (filename || '').toLowerCase();
+  if (lower.endsWith('.mov')) return 'video/quicktime';
+  if (lower.endsWith('.webm')) return 'video/webm';
+  if (lower.endsWith('.mkv')) return 'video/x-matroska';
+  if (lower.endsWith('.m4v') || lower.endsWith('.mp4')) return 'video/mp4';
+  return 'video/mp4';
+}
+
+export function normalizeVideoBlobMime(blob: Blob, filename?: string | null): Blob {
+  if (blob.type && blob.type.toLowerCase().startsWith('video/')) {
+    return blob;
+  }
+  const inferred = inferVideoMimeType(filename, blob.type);
+  return new Blob([blob], { type: inferred });
+}
+
 export async function storeBlobAsset(key: string, blob: Blob): Promise<string> {
+  if (!(blob instanceof Blob) || blob.size === 0) {
+    throw new Error(`Cannot store empty or invalid Blob under key "${key}".`);
+  }
   await idbSet('blobs', key, blob);
   if (blobUrls.has(key)) {
-    URL.revokeObjectURL(blobUrls.get(key)!);
+    try {
+      URL.revokeObjectURL(blobUrls.get(key)!);
+    } catch {
+      // ignore
+    }
   }
   const url = URL.createObjectURL(blob);
   blobUrls.set(key, url);
   return url;
 }
 
+export async function getBlobAssetByKey(key: string): Promise<Blob | null> {
+  if (!key) return null;
+  const item = await idbGet<unknown>('blobs', key);
+  if (item instanceof Blob && item.size > 0) {
+    return item;
+  }
+  return null;
+}
+
 export async function getBlobAssetUrl(key: string): Promise<string | null> {
   if (blobUrls.has(key)) return blobUrls.get(key)!;
-  const blob = await idbGet<Blob>('blobs', key);
+  const blob = await getBlobAssetByKey(key);
   if (!blob) return null;
   const url = URL.createObjectURL(blob);
   blobUrls.set(key, url);
   return url;
 }
+
+export interface RetrievedProjectVideoBlob {
+  blob: Blob;
+  blobKey: string | null;
+  lookupSource:
+    | 'sourceVideoBlobKey'
+    | 'idb-url'
+    | 'project-key'
+    | 'blobs-scan'
+    | 'media-cache'
+    | 'live-blob-url';
+}
+
+function parseBlobKeyTimestamp(key: string): number | null {
+  const match = /^video_(?:[0-9a-f-]{8,}_)?(\d{10,14})_/.exec(key);
+  if (!match) return null;
+  const ts = Number(match[1]);
+  return Number.isFinite(ts) ? ts : null;
+}
+
+function isLikelyVideoBlobEntry(key: string, blob: Blob): boolean {
+  if (key.startsWith('fish_')) return false;
+  if (blob.type.toLowerCase().startsWith('audio/') || blob.type.toLowerCase().startsWith('image/')) {
+    return false;
+  }
+  if (key.startsWith('video_') || blob.type.toLowerCase().startsWith('video/')) return true;
+  return /\.(mp4|mov|mkv|webm|m4v)$/i.test(key);
+}
+
+export async function retrieveProjectVideoBlob(
+  project: Pick<
+    Project,
+    'id' | 'sourceVideoUrl' | 'sourceVideoBlobKey' | 'sourceFilename' | 'metadata' | 'createdAt' | 'updatedAt'
+  >
+): Promise<RetrievedProjectVideoBlob | null> {
+  const filename = project.sourceFilename || null;
+
+  // 1. Direct lookup using persisted sourceVideoBlobKey
+  if (project.sourceVideoBlobKey) {
+    const direct = await getBlobAssetByKey(project.sourceVideoBlobKey).catch(() => null);
+    if (direct && direct.size > 0) {
+      const normalized = normalizeVideoBlobMime(direct, filename || project.sourceVideoBlobKey);
+      console.info('[VideoStorage] Retrieved original video Blob via sourceVideoBlobKey:', {
+        projectId: project.id,
+        blobFound: true,
+        blobKey: project.sourceVideoBlobKey,
+        size: normalized.size,
+        mimeType: normalized.type,
+      });
+      return {
+        blob: normalized,
+        blobKey: project.sourceVideoBlobKey,
+        lookupSource: 'sourceVideoBlobKey',
+      };
+    }
+  }
+
+  // 2. Direct idb://blobs/<key> scheme if present
+  if (project.sourceVideoUrl && project.sourceVideoUrl.startsWith('idb://blobs/')) {
+    const key = project.sourceVideoUrl.slice('idb://blobs/'.length);
+    const byIdbUrl = await getBlobAssetByKey(key).catch(() => null);
+    if (byIdbUrl && byIdbUrl.size > 0) {
+      const normalized = normalizeVideoBlobMime(byIdbUrl, filename || key);
+      console.info('[VideoStorage] Retrieved original video Blob via idb:// URL:', {
+        projectId: project.id,
+        blobFound: true,
+        blobKey: key,
+        size: normalized.size,
+        mimeType: normalized.type,
+      });
+      return { blob: normalized, blobKey: key, lookupSource: 'idb-url' };
+    }
+  }
+
+  // 3. Deterministic fallback key for recovered project blobs
+  const deterministicKey = `video_project_${project.id}`;
+  const deterministicBlob = await getBlobAssetByKey(deterministicKey).catch(() => null);
+  if (deterministicBlob && deterministicBlob.size > 0) {
+    const normalized = normalizeVideoBlobMime(deterministicBlob, filename);
+    console.info('[VideoStorage] Retrieved original video Blob via deterministic project key:', {
+      projectId: project.id,
+      blobFound: true,
+      blobKey: deterministicKey,
+      size: normalized.size,
+      mimeType: normalized.type,
+    });
+    return { blob: normalized, blobKey: deterministicKey, lookupSource: 'project-key' };
+  }
+
+  // 4. Scan "blobs" store to recover legacy uploaded projects whose sourceVideoUrl was an ephemeral blob: URL
+  try {
+    const entries = await idbListRawEntries('blobs');
+    const targetSize = project.metadata?.fileSize || 0;
+    const refTime =
+      Date.parse(project.updatedAt || project.createdAt || '') ||
+      Date.parse(project.createdAt || '') ||
+      0;
+
+    let bestEntry: { key: string; blob: Blob; score: number } | null = null;
+    for (const entry of entries) {
+      if (!entry.key || !(entry.value instanceof Blob) || entry.value.size <= 0) continue;
+      if (!isLikelyVideoBlobEntry(entry.key, entry.value)) continue;
+
+      let score = 0;
+      const matchesProjectId = entry.key.includes(`_${project.id}_`);
+      const matchesFilename = Boolean(
+        filename &&
+          (entry.key === filename ||
+            entry.key.endsWith(`_${filename}`) ||
+            entry.key.toLowerCase().endsWith(`_${filename.toLowerCase()}`))
+      );
+      const matchesSize = targetSize > 0 && entry.value.size === targetSize;
+
+      if (matchesProjectId) score += 150;
+      if (matchesFilename) score += 100;
+      if (matchesSize) score += 80;
+      if (entry.key.startsWith('video_')) score += 15;
+
+      // Require at least filename, project ID, or exact file size match (or single video blob when project expects a local blob)
+      if (!matchesProjectId && !matchesFilename && !matchesSize) continue;
+
+      if (refTime > 0) {
+        const keyTs = parseBlobKeyTimestamp(entry.key);
+        if (keyTs) {
+          const diffHours = Math.abs(refTime - keyTs) / (1000 * 60 * 60);
+          score += Math.max(0, 30 - Math.min(30, diffHours));
+        }
+      }
+
+      if (!bestEntry || score > bestEntry.score) {
+        bestEntry = { key: entry.key, blob: entry.value, score };
+      }
+    }
+
+    if (bestEntry) {
+      const normalized = normalizeVideoBlobMime(bestEntry.blob, filename || bestEntry.key);
+      // Non-destructively backfill sourceVideoBlobKey on stored project record so future loads are O(1)
+      try {
+        const storedProj = await idbGet<Project>('projects', project.id);
+        if (storedProj && !storedProj.sourceVideoBlobKey) {
+          await idbSet('projects', project.id, {
+            ...storedProj,
+            sourceVideoBlobKey: bestEntry.key,
+          });
+        }
+      } catch {
+        // Non-fatal; keep returning retrieved Blob
+      }
+
+      console.info('[VideoStorage] Recovered original video Blob from blobs store scan:', {
+        projectId: project.id,
+        blobFound: true,
+        blobKey: bestEntry.key,
+        size: normalized.size,
+        mimeType: normalized.type,
+      });
+      return {
+        blob: normalized,
+        blobKey: bestEntry.key,
+        lookupSource: 'blobs-scan',
+      };
+    }
+  } catch (err) {
+    console.warn('[VideoStorage] Blobs store scan failed:', err);
+  }
+
+  // 5. Check indexedDbStore mediaCache (used for synced/cached URLs)
+  if (project.sourceVideoUrl) {
+    const cached = await indexedDbStore.getCachedMediaByUrl(project.sourceVideoUrl).catch(() => null);
+    if (cached && cached.blob && cached.blob.size > 0) {
+      const normalized = normalizeVideoBlobMime(cached.blob, filename || cached.filename);
+      console.info('[VideoStorage] Retrieved original video Blob from mediaCache:', {
+        projectId: project.id,
+        blobFound: true,
+        blobKey: null,
+        size: normalized.size,
+        mimeType: normalized.type,
+      });
+      return { blob: normalized, blobKey: null, lookupSource: 'media-cache' };
+    }
+  }
+
+  // 6. Last-resort fallback for same-session live blob: URLs not yet persisted under blobs store
+  if (project.sourceVideoUrl && project.sourceVideoUrl.startsWith('blob:')) {
+    try {
+      const res = await fetch(project.sourceVideoUrl);
+      if (res.ok) {
+        const rawBlob = await res.blob();
+        if (rawBlob.size > 0) {
+          const normalized = normalizeVideoBlobMime(rawBlob, filename);
+          try {
+            await idbSet('blobs', deterministicKey, normalized);
+            const storedProj = await idbGet<Project>('projects', project.id);
+            if (storedProj && !storedProj.sourceVideoBlobKey) {
+              await idbSet('projects', project.id, {
+                ...storedProj,
+                sourceVideoBlobKey: deterministicKey,
+              });
+            }
+          } catch {
+            // ignore persistence failure
+          }
+          console.info('[VideoStorage] Retrieved original video Blob from live blob URL:', {
+            projectId: project.id,
+            blobFound: true,
+            blobKey: deterministicKey,
+            size: normalized.size,
+            mimeType: normalized.type,
+          });
+          return { blob: normalized, blobKey: deterministicKey, lookupSource: 'live-blob-url' };
+        }
+      }
+    } catch {
+      // Stale blob URL from an older browser session; return null below
+    }
+  }
+
+  console.warn('[VideoStorage] Video Blob not found in IndexedDB for project:', {
+    projectId: project.id,
+    blobFound: false,
+    sourceVideoBlobKey: project.sourceVideoBlobKey || null,
+    sourceFilename: filename,
+    sourceVideoUrlKind: project.sourceVideoUrl ? project.sourceVideoUrl.split(':')[0] : null,
+  });
+  return null;
+}
+

@@ -7,10 +7,12 @@ import {
   ChevronRight,
   Crop,
   Grid,
+  Loader2,
   Maximize2,
   Minimize2,
   Pause,
   Play,
+  RefreshCw,
   RotateCcw,
   RotateCw,
   Volume2,
@@ -47,6 +49,7 @@ import {
   subscribeFontStatus,
 } from '../lib/fontCatalog';
 import { resolvePlayableAssetUrl } from '../lib/supabaseCloud';
+import { retrieveProjectVideoBlob } from '../lib/browserStorage';
 import {
   findActiveOriginalAudioAtTime,
   findActiveTimelineAudioAtTime,
@@ -426,6 +429,8 @@ export function VideoStudioPlayer({
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
 
+  const hasVideoSource = Boolean(project.sourceVideoUrl || project.sourceVideoBlobKey);
+
   // Measure actual preview stage pixel size so typography renders strictly proportional to export resolution
   useEffect(() => {
     const el = stageRef.current;
@@ -442,7 +447,7 @@ export function VideoStudioPlayer({
     const ro = new ResizeObserver(() => measure());
     ro.observe(el);
     return () => ro.disconnect();
-  }, [project.sourceVideoUrl, aspectPreviewMode, effectiveAspect, viewportSize.width, viewportSize.height]);
+  }, [hasVideoSource, project.id, aspectPreviewMode, effectiveAspect, viewportSize.width, viewportSize.height]);
 
   // Load and monitor primary caption font & extra element fonts via real FontFace loader
   useEffect(() => {
@@ -555,9 +560,17 @@ export function VideoStudioPlayer({
         (dubAudioRef.current?.duration || 0) + (project.voice.timingOffsetSec || 0)
       )
     : 0;
-  const effectiveDuration = project.sourceVideoUrl
+  const effectiveDuration = hasVideoSource
     ? Math.max(getProjectEffectiveDuration(project), dubTotalDuration)
     : 0;
+
+  const isVideoLayerVisible = Boolean(
+    canvas.videoVisible !== false &&
+      (activeVideoMatch ||
+        (videoClips.length === 0 &&
+          hasVideoSource &&
+          !project.workflow?.completedStages?.includes('editor')))
+  );
 
   const bgmClips = useMemo(
     () => getEffectiveBgmClips(project, effectiveDuration || project.metadata?.duration || 12),
@@ -576,15 +589,19 @@ export function VideoStudioPlayer({
     [sfxClips, currentTime]
   );
 
+  const [previewVideoUrl, setPreviewVideoUrl] = useState<string | null>(null);
+  const [previewVideoStatus, setPreviewVideoStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [previewVideoError, setPreviewVideoError] = useState<string | null>(null);
+  const [videoReloadNonce, setVideoReloadNonce] = useState(0);
+  const ownedObjectUrlRef = useRef<string | null>(null);
+
   const [resolvedUrls, setResolvedUrls] = useState<{
-    video: string | null;
     dub: string | null;
     music: string | null;
     sfx: string | null;
     bgImage: string | null;
     logos: Record<string, string>;
   }>({
-    video: project.sourceVideoUrl,
     dub: project.voice.fullDubUrl || null,
     music: project.voice.bgMusicUrl || null,
     sfx: project.voice.sfxUrl || null,
@@ -592,20 +609,19 @@ export function VideoStudioPlayer({
     logos: {},
   });
 
+  // Resolve auxiliary audio, background image, and logo overlays asynchronously
   useEffect(() => {
     let active = true;
     const bgUrl = project.canvas?.bgImageUrl || null;
     const logoList = project.logos || [];
     setResolvedUrls((prev) => ({
       ...prev,
-      video: project.sourceVideoUrl,
       dub: project.voice.fullDubUrl || null,
       music: project.voice.bgMusicUrl || null,
       sfx: project.voice.sfxUrl || null,
       bgImage: bgUrl,
     }));
     void Promise.all([
-      resolvePlayableAssetUrl(project.sourceVideoUrl, project.cloudAssets),
       resolvePlayableAssetUrl(project.voice.fullDubUrl || null, project.cloudAssets),
       resolvePlayableAssetUrl(project.voice.bgMusicUrl || null, project.cloudAssets),
       resolvePlayableAssetUrl(project.voice.sfxUrl || null, project.cloudAssets),
@@ -616,10 +632,9 @@ export function VideoStudioPlayer({
           (await resolvePlayableAssetUrl(l.url, project.cloudAssets)) || l.url,
         ] as const)
       ),
-    ]).then(([video, dub, music, sfx, bgImage, logoEntries]) => {
+    ]).then(([dub, music, sfx, bgImage, logoEntries]) => {
       if (!active) return;
       setResolvedUrls({
-        video: video || project.sourceVideoUrl,
         dub: dub || project.voice.fullDubUrl || null,
         music: music || project.voice.bgMusicUrl || null,
         sfx: sfx || project.voice.sfxUrl || null,
@@ -631,7 +646,7 @@ export function VideoStudioPlayer({
       active = false;
     };
   }, [
-    project.sourceVideoUrl,
+    project.id,
     project.voice.fullDubUrl,
     project.voice.bgMusicUrl,
     project.voice.sfxUrl,
@@ -640,6 +655,7 @@ export function VideoStudioPlayer({
     project.cloudAssets,
   ]);
 
+  // Reset playback state when switching projects
   useEffect(() => {
     setNaturalSize(null);
     setIsPlaying(false);
@@ -650,7 +666,137 @@ export function VideoStudioPlayer({
     dubAudioRef.current?.pause();
     musicAudioRef.current?.pause();
     sfxAudioRef.current?.pause();
-  }, [project.id, project.sourceVideoUrl, videoRef]);
+  }, [project.id, project.sourceVideoUrl, project.sourceVideoBlobKey, videoRef]);
+
+  // Retrieve original project video Blob from IndexedDB (or remote URL) before rendering <video>
+  useEffect(() => {
+    let cancelled = false;
+    let createdObjectUrl: string | null = null;
+
+    if (!project.sourceVideoUrl && !project.sourceVideoBlobKey) {
+      setPreviewVideoUrl(null);
+      setPreviewVideoStatus('idle');
+      setPreviewVideoError(null);
+      if (ownedObjectUrlRef.current) {
+        try {
+          URL.revokeObjectURL(ownedObjectUrlRef.current);
+        } catch {
+          // ignore
+        }
+        ownedObjectUrlRef.current = null;
+      }
+      return;
+    }
+
+    setPreviewVideoUrl(null);
+    setPreviewVideoStatus('loading');
+    setPreviewVideoError(null);
+
+    const resolveVideoSource = async () => {
+      const rawUrl = project.sourceVideoUrl || '';
+      const isIndexedDbBacked =
+        Boolean(project.sourceVideoBlobKey) ||
+        !rawUrl ||
+        rawUrl.startsWith('blob:') ||
+        rawUrl.startsWith('idb://');
+
+      if (!isIndexedDbBacked) {
+        const remoteUrl = await resolvePlayableAssetUrl(rawUrl, project.cloudAssets);
+        if (cancelled) return;
+        if (remoteUrl) {
+          console.info('[VideoPreview] Resolved remote/cached video source:', {
+            projectId: project.id,
+            blobFound: true,
+            sourceType: remoteUrl.startsWith('blob:') ? 'media-cache-blob' : 'remote-url',
+            objectUrlExists: remoteUrl.startsWith('blob:'),
+          });
+          setPreviewVideoUrl(remoteUrl);
+          return;
+        }
+      }
+
+      const retrieved = await retrieveProjectVideoBlob(project);
+      if (cancelled) return;
+
+      if (!retrieved || !(retrieved.blob instanceof Blob) || retrieved.blob.size === 0) {
+        console.error('[VideoPreview] Video Blob missing or empty in IndexedDB:', {
+          projectId: project.id,
+          blobFound: false,
+          blobSize: retrieved?.blob?.size ?? 0,
+          mimeType: retrieved?.blob?.type ?? '',
+          objectUrlExists: false,
+        });
+        setPreviewVideoUrl(null);
+        setPreviewVideoStatus('error');
+        setPreviewVideoError(
+          'Original video file was not found in IndexedDB local storage. Re-upload the source video to restore preview.'
+        );
+        return;
+      }
+
+      createdObjectUrl = URL.createObjectURL(retrieved.blob);
+      ownedObjectUrlRef.current = createdObjectUrl;
+
+      console.info('[VideoPreview] Original video Blob ready for playback:', {
+        projectId: project.id,
+        blobFound: true,
+        blobKey: retrieved.blobKey,
+        lookupSource: retrieved.lookupSource,
+        blobSize: retrieved.blob.size,
+        mimeType: retrieved.blob.type || '(empty)',
+        objectUrlExists: Boolean(createdObjectUrl),
+      });
+
+      setPreviewVideoUrl(createdObjectUrl);
+    };
+
+    void resolveVideoSource().catch((err) => {
+      if (cancelled) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[VideoPreview] Failed resolving project video source:', {
+        projectId: project.id,
+        error: msg,
+      });
+      setPreviewVideoUrl(null);
+      setPreviewVideoStatus('error');
+      setPreviewVideoError(`Failed to load project video from local storage: ${msg}`);
+    });
+
+    return () => {
+      cancelled = true;
+      if (createdObjectUrl) {
+        try {
+          URL.revokeObjectURL(createdObjectUrl);
+        } catch {
+          // ignore
+        }
+        if (ownedObjectUrlRef.current === createdObjectUrl) {
+          ownedObjectUrlRef.current = null;
+        }
+      }
+    };
+  }, [
+    project.id,
+    project.sourceVideoUrl,
+    project.sourceVideoBlobKey,
+    project.sourceFilename,
+    project.cloudAssets,
+    videoReloadNonce,
+  ]);
+
+  // Safety cleanup of any owned Object URL on component unmount
+  useEffect(() => {
+    return () => {
+      if (ownedObjectUrlRef.current) {
+        try {
+          URL.revokeObjectURL(ownedObjectUrlRef.current);
+        } catch {
+          // ignore
+        }
+        ownedObjectUrlRef.current = null;
+      }
+    };
+  }, []);
 
   // Synchronize 4-channel audio mixer & independent clip speed (all narration/music/SFX/unlinked orig locked at 1.0x)
   useEffect(() => {
@@ -763,6 +909,7 @@ export function VideoStudioPlayer({
     project.voice.sfxEnabled,
     project.voice.sfxMuted,
     project.voice.sfxVolume,
+    previewVideoUrl,
   ]);
 
   // Master 1.0x rAF timeline clock:
@@ -987,7 +1134,7 @@ export function VideoStudioPlayer({
 
   const togglePlay = async () => {
     const vid = videoRef.current;
-    if (!vid || !project.sourceVideoUrl) return;
+    if (!vid || !previewVideoUrl) return;
     resumeSharedAudioContext();
 
     if (!isPlaying) {
@@ -2207,6 +2354,106 @@ export function VideoStudioPlayer({
     canvas.backgroundType !== 'solid' ||
     (canvas.bgColor || '#09090B').toUpperCase() !== '#09090B';
 
+  const latestSourceTimeRef = useRef(0);
+  latestSourceTimeRef.current = activeVideoMatch?.sourceTime ?? 0;
+
+  // Assign previewVideoUrl to mounted <video>, explicitly call load(), wait for loadedmetadata/canplay, and log diagnostics
+  useEffect(() => {
+    if (!previewVideoUrl) return;
+    const vid = videoRef.current;
+    if (!vid) return;
+
+    const bgVid = bgVideoRef.current;
+    if (vid.getAttribute('src') !== previewVideoUrl) {
+      vid.src = previewVideoUrl;
+    }
+    vid.load();
+
+    if (bgVid) {
+      if (bgVid.getAttribute('src') !== previewVideoUrl) {
+        bgVid.src = previewVideoUrl;
+      }
+      bgVid.load();
+    }
+
+    const handleLoadedMetadata = () => {
+      if (vid.videoWidth && vid.videoHeight) {
+        setNaturalSize({ w: vid.videoWidth, h: vid.videoHeight });
+      }
+      const targetSrcTime = latestSourceTimeRef.current;
+      if (vid.duration && Number.isFinite(vid.duration) && targetSrcTime > 0.02) {
+        const clamped = Math.min(targetSrcTime, Math.max(0, vid.duration - 0.05));
+        vid.currentTime = clamped;
+        if (bgVid) bgVid.currentTime = clamped;
+      }
+      console.info('[VideoPreview] loadedmetadata:', {
+        projectId: project.id,
+        readyState: vid.readyState,
+        networkState: vid.networkState,
+        videoWidth: vid.videoWidth,
+        videoHeight: vid.videoHeight,
+        duration: vid.duration,
+      });
+      if (vid.readyState >= 2) {
+        setPreviewVideoStatus('ready');
+        setPreviewVideoError(null);
+      }
+    };
+
+    const handleCanPlay = () => {
+      console.info('[VideoPreview] canplay:', {
+        projectId: project.id,
+        readyState: vid.readyState,
+        networkState: vid.networkState,
+      });
+      setPreviewVideoStatus('ready');
+      setPreviewVideoError(null);
+    };
+
+    const handleError = () => {
+      const code = vid.error?.code ?? null;
+      const codeDesc =
+        code === 1
+          ? 'Playback aborted (MEDIA_ERR_ABORTED)'
+          : code === 2
+          ? 'Network/read failure while loading video (MEDIA_ERR_NETWORK)'
+          : code === 3
+          ? 'Video codec/stream decode error (MEDIA_ERR_DECODE)'
+          : code === 4
+          ? 'Video source or MIME format not supported by browser (MEDIA_ERR_SRC_NOT_SUPPORTED)'
+          : 'Unknown video loading error';
+      const detail = vid.error?.message ? `${codeDesc}: ${vid.error.message}` : codeDesc;
+      console.error('[VideoPreview] Video element error:', {
+        projectId: project.id,
+        readyState: vid.readyState,
+        networkState: vid.networkState,
+        errorCode: code,
+        errorMessage: detail,
+      });
+      setPreviewVideoStatus('error');
+      setPreviewVideoError(
+        `${detail} (readyState=${vid.readyState}, networkState=${vid.networkState}).`
+      );
+    };
+
+    vid.addEventListener('loadedmetadata', handleLoadedMetadata);
+    vid.addEventListener('canplay', handleCanPlay);
+    vid.addEventListener('error', handleError);
+
+    if (vid.readyState >= 1) {
+      handleLoadedMetadata();
+    }
+    if (vid.readyState >= 3) {
+      handleCanPlay();
+    }
+
+    return () => {
+      vid.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      vid.removeEventListener('canplay', handleCanPlay);
+      vid.removeEventListener('error', handleError);
+    };
+  }, [previewVideoUrl, project.id, hasCustomCanvas, videoRef]);
+
   const stageMetrics = useMemo(() => {
     let ratioW = srcW;
     let ratioH = srcH;
@@ -2390,7 +2637,7 @@ export function VideoStudioPlayer({
       width: `${fgW}%`,
       height: `${fgH}%`,
       opacity:
-        canvas.videoVisible === false || !activeVideoMatch ? 0 : canvas.videoOpacity ?? 1,
+        !isVideoLayerVisible ? 0 : canvas.videoOpacity ?? 1,
       transform: fgTransformParts.length > 0 ? fgTransformParts.join(' ') : undefined,
       transformOrigin: fxEval.transformOrigin,
       clipPath: fxEval.wipeClipPath,
@@ -2874,7 +3121,7 @@ export function VideoStudioPlayer({
               </button>
             </div>
 
-            {!readOnlyPreview && onUpdateCanvas && project.sourceVideoUrl && (
+            {!readOnlyPreview && onUpdateCanvas && hasVideoSource && (
               <button
                 type="button"
                 onClick={() => setCropEditActive(!isCropEditActive)}
@@ -3061,7 +3308,7 @@ export function VideoStudioPlayer({
             </div>
           </>
         )}
-        {project.sourceVideoUrl ? (
+        {hasVideoSource ? (
           <div
             ref={stageRef}
             onPointerDown={handleStagePointerDown}
@@ -3121,17 +3368,19 @@ export function VideoStudioPlayer({
                 </div>
               )}
 
-            {canvas.backgroundType === 'blur' && canvas.bgImageVisible !== false && (
+            {canvas.backgroundType === 'blur' && canvas.bgImageVisible !== false && previewVideoUrl && (
               <video
                 ref={bgVideoRef}
-                src={resolvedUrls.video || project.sourceVideoUrl}
+                key={`${project.id}:bg`}
+                src={previewVideoUrl}
                 muted
                 playsInline
+                preload="auto"
                 aria-hidden="true"
                 className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none"
                 style={{
                   zIndex: 5,
-                  opacity: activeVideoMatch ? canvas.bgBlurOpacity ?? 0.9 : 0,
+                  opacity: isVideoLayerVisible ? canvas.bgBlurOpacity ?? 0.9 : 0,
                   filter: `blur(${Math.max(2, Math.round((canvas.bgBlurIntensity || 24) * 0.65))}px) brightness(${Math.max(
                     0.3,
                     1 + (canvas.bgBlurBrightness ?? -15) / 100
@@ -3141,133 +3390,172 @@ export function VideoStudioPlayer({
               />
             )}
 
-            {/* Foreground Video Layer */}
-            {hasCustomCanvas ? (
-              <div
-                style={{
-                  ...stageMetrics.fgBoxStyle,
-                  zIndex: layerZIndexMap.get('video') ?? 10,
-                }}
-                onPointerDown={(e) => {
-                  if (readOnlyPreview || drawMode !== 'none' || isCropEditActive) return;
-                  e.stopPropagation();
-                  onSelectElement?.({ kind: 'video', clipId: activeVideoMatch?.clip.id });
-                  if (!onUpdateCanvas || canvas.videoLocked) {
-                    void togglePlay();
-                    return;
-                  }
-                  setInteraction({
-                    kind: 'video',
-                    action: 'move',
-                    startClientX: e.clientX,
-                    startClientY: e.clientY,
-                    origOffsetX: canvas.offsetX || 0,
-                    origOffsetY: canvas.offsetY || 0,
-                    origZoom: canvas.zoom || 1,
-                    origRot: canvas.videoRotation || 0,
-                    moved: false,
-                  });
-                }}
-                className={`touch-none ${
-                  editingGuidesOn && isSelectedEl({ kind: 'video' }) && !canvas.videoLocked
-                    ? 'ring-2 ring-violet-400'
-                    : ''
-                } ${onUpdateCanvas && !canvas.videoLocked && drawMode === 'none' ? 'cursor-move' : ''}`}
-              >
-                <div className="w-full h-full overflow-hidden relative">
-                  <video
-                    ref={videoRef}
-                    src={resolvedUrls.video || project.sourceVideoUrl}
-                    playsInline
-                    style={stageMetrics.fgVideoStyle}
-                    onLoadedMetadata={(e) => {
-                      const v = e.currentTarget;
-                      if (v.videoWidth && v.videoHeight) {
-                        setNaturalSize({ w: v.videoWidth, h: v.videoHeight });
-                      }
-                    }}
-                    onEnded={() => {
-                      videoRef.current?.pause();
-                      bgVideoRef.current?.pause();
-                    }}
-                  />
-                  {fxEval.pixelateBlockSize > 0 && (
-                    <canvas
-                      ref={pixelCanvasRef}
-                      style={{
-                        ...stageMetrics.fgVideoStyle,
-                        imageRendering: 'pixelated',
-                        opacity: fxEval.pixelateOpacity,
-                      }}
-                      className="pointer-events-none"
-                    />
-                  )}
-                </div>
-                {editingGuidesOn &&
-                  isSelectedEl({ kind: 'video' }) &&
-                  !canvas.videoLocked &&
-                  onUpdateCanvas &&
-                  !isCropEditActive &&
-                  renderTransformHandles(
-                    (dir, ev) => {
-                      setInteraction({
-                        kind: 'video',
-                        action: 'resize',
-                        dir,
-                        startClientX: ev.clientX,
-                        startClientY: ev.clientY,
-                        origOffsetX: canvas.offsetX || 0,
-                        origOffsetY: canvas.offsetY || 0,
-                        origZoom: canvas.zoom || 1,
-                        origRot: canvas.videoRotation || 0,
-                        moved: true,
-                      });
-                    },
-                    (ev) => {
-                      const elRect = ev.currentTarget.parentElement?.getBoundingClientRect();
-                      setInteraction({
-                        kind: 'video',
-                        action: 'rotate',
-                        startClientX: ev.clientX,
-                        startClientY: ev.clientY,
-                        origOffsetX: canvas.offsetX || 0,
-                        origOffsetY: canvas.offsetY || 0,
-                        origZoom: canvas.zoom || 1,
-                        origRot: canvas.videoRotation || 0,
-                        centerClientX: elRect ? elRect.left + elRect.width / 2 : ev.clientX,
-                        centerClientY: elRect ? elRect.top + elRect.height / 2 : ev.clientY,
-                        moved: true,
-                      });
-                    }
-                  )}
-              </div>
-            ) : (
-              <video
-                ref={videoRef}
-                src={resolvedUrls.video || project.sourceVideoUrl}
-                playsInline
-                style={{
-                  filter: effectiveVideoFilterCss,
-                  opacity: activeVideoMatch && canvas.videoVisible !== false ? 1 : 0,
-                  zIndex: layerZIndexMap.get('video') ?? 10,
-                }}
-                onLoadedMetadata={(e) => {
-                  const v = e.currentTarget;
-                  if (v.videoWidth && v.videoHeight) {
-                    setNaturalSize({ w: v.videoWidth, h: v.videoHeight });
-                  }
-                }}
-                onEnded={() => {
-                  videoRef.current?.pause();
-                }}
-                onClick={() => {
-                  if (drawMode === 'none' && !isCropEditActive) {
+            {/* Foreground Video Layer (only mounted after async Blob / URL resolution completes) */}
+            {previewVideoUrl ? (
+              hasCustomCanvas ? (
+                <div
+                  style={{
+                    ...stageMetrics.fgBoxStyle,
+                    zIndex: layerZIndexMap.get('video') ?? 10,
+                  }}
+                  onPointerDown={(e) => {
+                    if (readOnlyPreview || drawMode !== 'none' || isCropEditActive) return;
+                    e.stopPropagation();
                     onSelectElement?.({ kind: 'video', clipId: activeVideoMatch?.clip.id });
-                    void togglePlay();
-                  }
-                }}
-                className={`w-full h-full relative ${stageMetrics.fitClass}`}
-              />
+                    if (!onUpdateCanvas || canvas.videoLocked) {
+                      void togglePlay();
+                      return;
+                    }
+                    setInteraction({
+                      kind: 'video',
+                      action: 'move',
+                      startClientX: e.clientX,
+                      startClientY: e.clientY,
+                      origOffsetX: canvas.offsetX || 0,
+                      origOffsetY: canvas.offsetY || 0,
+                      origZoom: canvas.zoom || 1,
+                      origRot: canvas.videoRotation || 0,
+                      moved: false,
+                    });
+                  }}
+                  className={`touch-none ${
+                    editingGuidesOn && isSelectedEl({ kind: 'video' }) && !canvas.videoLocked
+                      ? 'ring-2 ring-violet-400'
+                      : ''
+                  } ${onUpdateCanvas && !canvas.videoLocked && drawMode === 'none' ? 'cursor-move' : ''}`}
+                >
+                  <div className="w-full h-full overflow-hidden relative">
+                    <video
+                      ref={videoRef}
+                      key={`${project.id}:fg-custom`}
+                      src={previewVideoUrl}
+                      playsInline
+                      preload="auto"
+                      style={stageMetrics.fgVideoStyle}
+                      onLoadedMetadata={(e) => {
+                        const v = e.currentTarget;
+                        if (v.videoWidth && v.videoHeight) {
+                          setNaturalSize({ w: v.videoWidth, h: v.videoHeight });
+                        }
+                      }}
+                      onEnded={() => {
+                        videoRef.current?.pause();
+                        bgVideoRef.current?.pause();
+                      }}
+                    />
+                    {fxEval.pixelateBlockSize > 0 && (
+                      <canvas
+                        ref={pixelCanvasRef}
+                        style={{
+                          ...stageMetrics.fgVideoStyle,
+                          imageRendering: 'pixelated',
+                          opacity: fxEval.pixelateOpacity,
+                        }}
+                        className="pointer-events-none"
+                      />
+                    )}
+                  </div>
+                  {editingGuidesOn &&
+                    isSelectedEl({ kind: 'video' }) &&
+                    !canvas.videoLocked &&
+                    onUpdateCanvas &&
+                    !isCropEditActive &&
+                    renderTransformHandles(
+                      (dir, ev) => {
+                        setInteraction({
+                          kind: 'video',
+                          action: 'resize',
+                          dir,
+                          startClientX: ev.clientX,
+                          startClientY: ev.clientY,
+                          origOffsetX: canvas.offsetX || 0,
+                          origOffsetY: canvas.offsetY || 0,
+                          origZoom: canvas.zoom || 1,
+                          origRot: canvas.videoRotation || 0,
+                          moved: true,
+                        });
+                      },
+                      (ev) => {
+                        const elRect = ev.currentTarget.parentElement?.getBoundingClientRect();
+                        setInteraction({
+                          kind: 'video',
+                          action: 'rotate',
+                          startClientX: ev.clientX,
+                          startClientY: ev.clientY,
+                          origOffsetX: canvas.offsetX || 0,
+                          origOffsetY: canvas.offsetY || 0,
+                          origZoom: canvas.zoom || 1,
+                          origRot: canvas.videoRotation || 0,
+                          centerClientX: elRect ? elRect.left + elRect.width / 2 : ev.clientX,
+                          centerClientY: elRect ? elRect.top + elRect.height / 2 : ev.clientY,
+                          moved: true,
+                        });
+                      }
+                    )}
+                </div>
+              ) : (
+                <video
+                  ref={videoRef}
+                  key={`${project.id}:fg-raw`}
+                  src={previewVideoUrl}
+                  playsInline
+                  preload="auto"
+                  style={{
+                    filter: effectiveVideoFilterCss,
+                    opacity: isVideoLayerVisible ? 1 : 0,
+                    zIndex: layerZIndexMap.get('video') ?? 10,
+                  }}
+                  onLoadedMetadata={(e) => {
+                    const v = e.currentTarget;
+                    if (v.videoWidth && v.videoHeight) {
+                      setNaturalSize({ w: v.videoWidth, h: v.videoHeight });
+                    }
+                  }}
+                  onEnded={() => {
+                    videoRef.current?.pause();
+                  }}
+                  onClick={() => {
+                    if (drawMode === 'none' && !isCropEditActive) {
+                      onSelectElement?.({ kind: 'video', clipId: activeVideoMatch?.clip.id });
+                      void togglePlay();
+                    }
+                  }}
+                  className={`w-full h-full relative ${stageMetrics.fitClass}`}
+                />
+              )
+            ) : null}
+
+            {/* Async Loading & Error States for Video Preview */}
+            {previewVideoStatus === 'loading' && (
+              <div className="absolute inset-0 z-40 bg-black/70 backdrop-blur-[2px] flex flex-col items-center justify-center gap-2 px-4 text-center pointer-events-none">
+                <Loader2 className="w-6 h-6 text-violet-400 animate-spin" />
+                <div className="text-xs font-medium text-zinc-200">
+                  Loading video preview...
+                </div>
+              </div>
+            )}
+
+            {previewVideoStatus === 'error' && (
+              <div className="absolute inset-0 z-40 bg-black/85 flex flex-col items-center justify-center gap-3 px-5 text-center">
+                <AlertTriangle className="w-7 h-7 text-amber-400" />
+                <div className="space-y-1 max-w-sm">
+                  <div className="text-xs font-semibold text-white">Video Preview Unavailable</div>
+                  <p className="text-[11px] text-zinc-300 leading-relaxed">
+                    {previewVideoError || 'Unable to load the original video file for preview.'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setVideoReloadNonce((n) => n + 1);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-xs font-medium text-white flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Retry Video Load
+                </button>
+              </div>
             )}
 
             {/* Interactive Crop Rectangle Editor Overlay directly over full source frame */}
@@ -3282,17 +3570,20 @@ export function VideoStudioPlayer({
                   style={stageMetrics.cropBoxWrapperStyle}
                 >
                   {/* Dimmed full original video preview */}
-                  <video
-                    src={resolvedUrls.video || project.sourceVideoUrl}
-                    muted
-                    playsInline
-                    ref={(el) => {
-                      if (el && Math.abs(el.currentTime - currentTime) > 0.25) {
-                        el.currentTime = Math.min(currentTime, Math.max(0, srcDuration - 0.05));
-                      }
-                    }}
-                    className="w-full h-full object-fill opacity-35 pointer-events-none"
-                  />
+                  {previewVideoUrl && (
+                    <video
+                      src={previewVideoUrl}
+                      muted
+                      playsInline
+                      preload="auto"
+                      ref={(el) => {
+                        if (el && Math.abs(el.currentTime - currentTime) > 0.25) {
+                          el.currentTime = Math.min(currentTime, Math.max(0, srcDuration - 0.05));
+                        }
+                      }}
+                      className="w-full h-full object-fill opacity-35 pointer-events-none"
+                    />
+                  )}
 
                   {/* Draggable & 8-handle Resizable Crop Region */}
                   <div
@@ -3639,10 +3930,10 @@ export function VideoStudioPlayer({
             )}
 
             {/* Synchronized 1.0x Unlinked Original Audio, AI Dub, Background Music & Sound Effects */}
-            {hasUnlinkedAudio && project.sourceVideoUrl && (
+            {hasUnlinkedAudio && previewVideoUrl && (
               <audio
                 ref={origAudioRef}
-                src={resolvedUrls.video || project.sourceVideoUrl}
+                src={previewVideoUrl}
                 preload="auto"
                 crossOrigin="anonymous"
               />
@@ -4195,7 +4486,7 @@ export function VideoStudioPlayer({
             <button
               type="button"
               onClick={togglePlay}
-              disabled={!project.sourceVideoUrl}
+              disabled={!previewVideoUrl}
               className="min-w-[36px] min-h-[36px] rounded-lg bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:opacity-40 text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
               aria-label={isPlaying ? 'Pause' : 'Play'}
             >
@@ -4210,7 +4501,7 @@ export function VideoStudioPlayer({
               <button
                 type="button"
                 onClick={() => stepFrame(-1)}
-                disabled={!project.sourceVideoUrl}
+                disabled={!previewVideoUrl}
                 title="Previous frame"
                 aria-label="Previous frame"
                 className="min-w-[30px] min-h-[30px] p-1 rounded-md text-zinc-400 hover:text-white hover:bg-white/[0.06] disabled:opacity-40 flex items-center justify-center cursor-pointer"
@@ -4220,7 +4511,7 @@ export function VideoStudioPlayer({
               <button
                 type="button"
                 onClick={() => stepFrame(1)}
-                disabled={!project.sourceVideoUrl}
+                disabled={!previewVideoUrl}
                 title="Next frame"
                 aria-label="Next frame"
                 className="min-w-[30px] min-h-[30px] p-1 rounded-md text-zinc-400 hover:text-white hover:bg-white/[0.06] disabled:opacity-40 flex items-center justify-center cursor-pointer"
@@ -4312,7 +4603,7 @@ export function VideoStudioPlayer({
             max={Math.max(0.1, effectiveDuration)}
             step={0.02}
             value={Math.min(currentTime, effectiveDuration || 0)}
-            disabled={!project.sourceVideoUrl}
+            disabled={!previewVideoUrl}
             onChange={(e) => seekTo(Number(e.target.value))}
             className="w-full accent-violet-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
             aria-label="Seek video timeline"
@@ -4323,7 +4614,7 @@ export function VideoStudioPlayer({
               <button
                 type="button"
                 onClick={togglePlay}
-                disabled={!project.sourceVideoUrl}
+                disabled={!previewVideoUrl}
                 className="w-9 h-9 rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white flex items-center justify-center transition-colors cursor-pointer"
                 aria-label={isPlaying ? 'Pause' : 'Play'}
               >
@@ -4333,7 +4624,7 @@ export function VideoStudioPlayer({
               <button
                 type="button"
                 onClick={() => stepFrame(-1)}
-                disabled={!project.sourceVideoUrl}
+                disabled={!previewVideoUrl}
                 title="Previous frame"
                 className="p-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 disabled:opacity-40 text-zinc-200 cursor-pointer"
               >
@@ -4342,7 +4633,7 @@ export function VideoStudioPlayer({
               <button
                 type="button"
                 onClick={() => stepFrame(1)}
-                disabled={!project.sourceVideoUrl}
+                disabled={!previewVideoUrl}
                 title="Next frame"
                 className="p-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 disabled:opacity-40 text-zinc-200 cursor-pointer"
               >

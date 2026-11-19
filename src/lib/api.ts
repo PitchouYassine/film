@@ -29,6 +29,7 @@ import type { FontCatalogItem } from './fontCatalog';
 import { handleLocalApiFallback } from './localApiFallback';
 import { processVideoUploadInBrowser } from './browserVideoProcessor';
 import { idbGet, idbSet } from './browserStorage';
+import { createDefaultMainVideoClip } from './videoTimeline';
 import {
   getStoredFishApiKey,
   getFishAudioSettingsSummary,
@@ -918,7 +919,14 @@ export async function uploadVideoChunked(params: {
   } catch (err) {
     // Fallback to local browser-side video processing via FFmpeg.wasm & IndexedDB
     onProgress(5, 'Backend server offline. Processing video locally in browser...');
-    const result = await processVideoUploadInBrowser(file, onProgress);
+    const result = await processVideoUploadInBrowser(file, onProgress, projectId);
+    const firstThumbUrl = result.filmstrip.find((f) => Boolean(f.url))?.url || null;
+    const defaultMainClip = createDefaultMainVideoClip({
+      filename: file.name,
+      name: file.name.replace(/\.[^/.]+$/, ''),
+      duration: result.duration || result.metadata?.duration || 12,
+      audioUnlinked: false,
+    });
 
     let project = await idbGet<Project>('projects', projectId);
     if (!project) {
@@ -928,8 +936,9 @@ export async function uploadVideoChunked(params: {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         sourceVideoUrl: result.sourceVideoUrl,
+        sourceVideoBlobKey: result.sourceVideoBlobKey,
         sourceFilename: file.name,
-        thumbnailUrl: null,
+        thumbnailUrl: firstThumbUrl,
         metadata: result.metadata,
         waveformPeaks: result.waveforms.orig,
         captions: [],
@@ -1001,14 +1010,21 @@ export async function uploadVideoChunked(params: {
         lastExportUrl: null,
         lastExportSize: null,
         lastExportedAt: null,
-        videoClips: [],
+        videoClips: [defaultMainClip],
         originalAudioClips: [],
       };
     } else {
       project.sourceVideoUrl = result.sourceVideoUrl;
+      project.sourceVideoBlobKey = result.sourceVideoBlobKey;
       project.sourceFilename = file.name;
+      if (!project.thumbnailUrl && firstThumbUrl) {
+        project.thumbnailUrl = firstThumbUrl;
+      }
       project.metadata = result.metadata;
       project.waveformPeaks = result.waveforms.orig;
+      if (!Array.isArray(project.videoClips) || project.videoClips.length === 0) {
+        project.videoClips = [defaultMainClip];
+      }
       project.updatedAt = new Date().toISOString();
     }
 

@@ -32,6 +32,24 @@ export function getVideoClipTimelineEnd(clip: VideoClip): number {
   return r3(Math.max(0, clip.timelineStart || 0) + getVideoClipTimelineDuration(clip));
 }
 
+export function createDefaultMainVideoClip(params: {
+  filename?: string | null;
+  name?: string | null;
+  duration?: number | null;
+  audioUnlinked?: boolean;
+}): VideoClip {
+  const rawDur = Math.max(0.5, Number(params.duration) || 12);
+  return {
+    id: 'vclip_main',
+    label: params.filename || params.name || 'Main Video',
+    sourceStart: 0,
+    sourceEnd: r3(rawDur),
+    timelineStart: 0,
+    speed: 1.0,
+    audioUnlinked: Boolean(params.audioUnlinked),
+  };
+}
+
 export function getEffectiveVideoClips(project: Project): VideoClip[] {
   const rawDur = Math.max(0.5, project.metadata?.duration || 12);
   if (Array.isArray(project.videoClips)) {
@@ -57,18 +75,15 @@ export function getEffectiveVideoClips(project: Project): VideoClip[] {
       .sort((a, b) => a.timelineStart - b.timelineStart);
   }
 
-  if (!project.sourceVideoUrl) return [];
+  if (!project.sourceVideoUrl && !project.sourceVideoBlobKey) return [];
 
   return [
-    {
-      id: 'vclip_main',
-      label: project.sourceFilename || project.name || 'Main Video',
-      sourceStart: 0,
-      sourceEnd: r3(rawDur),
-      timelineStart: 0,
-      speed: 1.0,
+    createDefaultMainVideoClip({
+      filename: project.sourceFilename,
+      name: project.name,
+      duration: rawDur,
       audioUnlinked: Boolean(project.originalAudioClips && project.originalAudioClips.length > 0),
-    },
+    }),
   ];
 }
 

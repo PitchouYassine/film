@@ -829,7 +829,7 @@ export default function App() {
         return;
       }
 
-      if (!project.sourceVideoUrl && !navigateTo) {
+      if (!project.sourceVideoUrl && !project.sourceVideoBlobKey && !navigateTo) {
         setActiveView('projects');
         setActiveTool(null);
         return;
@@ -3474,7 +3474,7 @@ export default function App() {
                 setMoreMenuOpen(false);
                 setActiveView('export');
               }}
-              disabled={!activeProject.sourceVideoUrl}
+              disabled={!activeProject.sourceVideoUrl && !activeProject.sourceVideoBlobKey}
               className="min-h-[38px] px-3 sm:px-4 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-xs sm:text-sm font-semibold text-white flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer shadow-lg shadow-violet-600/25"
             >
               <Upload className="w-3.5 h-3.5 sm:w-4 sm:h-4" />

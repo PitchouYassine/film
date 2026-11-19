@@ -1,7 +1,7 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
 import { FilmstripFrame, ProjectAudioWaveforms, VideoMetadata } from '../types/studio';
-import { storeBlobAsset } from './browserStorage';
+import { buildProjectVideoBlobKey, normalizeVideoBlobMime, storeBlobAsset } from './browserStorage';
 
 let ffmpegInstance: FFmpeg | null = null;
 let ffmpegLoadingPromise: Promise<FFmpeg> | null = null;
@@ -287,13 +287,23 @@ export async function extractAudioWaveformInBrowser(file: File, bars = 120): Pro
 
 export async function processVideoUploadInBrowser(
   file: File,
-  onProgress: (pct: number, stage: string) => void
-): Promise<{ sourceVideoUrl: string; metadata: VideoMetadata; duration: number; filmstrip: FilmstripFrame[]; waveforms: ProjectAudioWaveforms }> {
+  onProgress: (pct: number, stage: string) => void,
+  projectId?: string
+): Promise<{
+  sourceVideoUrl: string;
+  sourceVideoBlobKey: string;
+  metadata: VideoMetadata;
+  duration: number;
+  filmstrip: FilmstripFrame[];
+  waveforms: ProjectAudioWaveforms;
+}> {
   onProgress(10, 'Reading video file in browser...');
   const { metadata, duration } = await analyzeVideoFileInBrowser(file);
 
   onProgress(35, 'Storing video locally in browser (IndexedDB)...');
-  const sourceVideoUrl = await storeBlobAsset(`video_${Date.now()}_${file.name}`, file);
+  const sourceVideoBlobKey = buildProjectVideoBlobKey(projectId, file.name);
+  const normalizedBlob = normalizeVideoBlobMime(file, file.name);
+  const sourceVideoUrl = await storeBlobAsset(sourceVideoBlobKey, normalizedBlob);
 
   onProgress(60, 'Generating visual filmstrip frames (0/12)...');
   const { frames: filmstrip } = await generateFilmstripInBrowser(file, 12, onProgress, duration);
@@ -304,6 +314,7 @@ export async function processVideoUploadInBrowser(
   onProgress(100, 'Video ready for studio editing');
   return {
     sourceVideoUrl,
+    sourceVideoBlobKey,
     metadata,
     duration,
     filmstrip,

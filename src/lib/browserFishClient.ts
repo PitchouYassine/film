@@ -11,7 +11,7 @@ import {
   clampContinuousPauseMs,
   normalizeSyncMode,
 } from '../../server/services/timeline_sync_service';
-import { idbGet, idbSet, storeBlobAsset } from './browserStorage';
+import { idbGet, idbSet, retrieveProjectVideoBlob, storeBlobAsset } from './browserStorage';
 import { distributeWordsEvenly } from './workflowStages';
 import {
   DEFAULT_FISH_API_BASE,
@@ -522,15 +522,23 @@ export async function transcribeWithFishViaProxy(
   sourceLanguage?: string
 ): Promise<{ project: Project; detectedLanguage: string; segmentCount: number }> {
   const project = await ensureLocalProject(projectId);
-  if (!project.sourceVideoUrl) {
+  if (!project.sourceVideoUrl && !project.sourceVideoBlobKey) {
     throw new Error('Upload a video before running Fish Audio transcription.');
   }
 
-  const mediaRes = await fetch(project.sourceVideoUrl);
-  if (!mediaRes.ok) {
+  let mediaBlob: Blob | null = null;
+  const retrieved = await retrieveProjectVideoBlob(project).catch(() => null);
+  if (retrieved?.blob && retrieved.blob.size > 0) {
+    mediaBlob = retrieved.blob;
+  } else if (project.sourceVideoUrl) {
+    const mediaRes = await fetch(project.sourceVideoUrl);
+    if (mediaRes.ok) {
+      mediaBlob = await mediaRes.blob();
+    }
+  }
+  if (!mediaBlob || mediaBlob.size === 0) {
     throw new Error('Unable to read project video media for transcription.');
   }
-  const mediaBlob = await mediaRes.blob();
   if (mediaBlob.size > 50 * 1024 * 1024) {
     throw new Error(
       'Video exceeds 50 MB for direct browser ASR proxy upload. Compress the video or import an SRT/VTT transcript.'

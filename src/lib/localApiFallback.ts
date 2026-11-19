@@ -15,6 +15,7 @@ import {
   normalizeSyncMode,
 } from '../../server/services/timeline_sync_service';
 import { idbGet, idbSet, idbList, idbDelete } from './browserStorage';
+import { createDefaultMainVideoClip } from './videoTimeline';
 import {
   getStoredFishApiKey,
   getFishAudioSettingsSummary,
@@ -40,6 +41,30 @@ const DEFAULT_PREFERENCES: DefaultStudioPreferences = {
   defaultSyncMode: 'flexible',
 };
 
+async function normalizeLocalProjectForLoad(proj: Project): Promise<Project> {
+  const hasVideo = Boolean(proj.sourceVideoUrl || proj.sourceVideoBlobKey);
+  const needsDefaultClip =
+    hasVideo &&
+    (!Array.isArray(proj.videoClips) ||
+      (proj.videoClips.length === 0 && !proj.workflow?.completedStages?.includes('editor')));
+
+  if (!needsDefaultClip) return proj;
+
+  const repaired: Project = {
+    ...proj,
+    videoClips: [
+      createDefaultMainVideoClip({
+        filename: proj.sourceFilename,
+        name: proj.name,
+        duration: proj.metadata?.duration,
+        audioUnlinked: Boolean(proj.originalAudioClips && proj.originalAudioClips.length > 0),
+      }),
+    ],
+  };
+  await idbSet('projects', repaired.id, repaired).catch(() => {});
+  return repaired;
+}
+
 export async function handleLocalApiFallback<T>(url: string, init?: RequestInit): Promise<T | undefined> {
   const method = (init?.method || 'GET').toUpperCase();
   const parsedUrl = new URL(url, 'http://localhost');
@@ -62,8 +87,9 @@ export async function handleLocalApiFallback<T>(url: string, init?: RequestInit)
   }
 
   if (pathname === '/api/projects' && method === 'GET') {
-    const projects = await idbList<Project>('projects');
-    return { projects: projects || [] } as unknown as T;
+    const rawProjects = await idbList<Project>('projects');
+    const projects = await Promise.all((rawProjects || []).map((p) => normalizeLocalProjectForLoad(p)));
+    return { projects } as unknown as T;
   }
 
   if (pathname === '/api/projects' && method === 'POST') {
@@ -293,7 +319,8 @@ export async function handleLocalApiFallback<T>(url: string, init?: RequestInit)
     if (method === 'GET') {
       const proj = await idbGet<Project>('projects', projId);
       if (!proj) throw new Error('Project not found');
-      return { project: proj } as unknown as T;
+      const normalized = await normalizeLocalProjectForLoad(proj);
+      return { project: normalized } as unknown as T;
     }
     if (method === 'PATCH') {
       const patch = init?.body ? JSON.parse(String(init.body)) : {};

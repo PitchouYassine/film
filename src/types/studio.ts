@@ -1222,6 +1222,7 @@ export interface Project {
   createdAt: string;
   updatedAt: string;
   sourceVideoUrl: string | null;
+  sourceVideoBlobKey?: string | null;
   sourceFilename: string | null;
   thumbnailUrl: string | null;
   savedThumbnails?: SavedProjectThumbnail[];

@@ -35,6 +35,7 @@ import {
   remapLogosForSyncPlan,
 } from '../../server/services/timeline_sync_service';
 import { resolveMediaBlob, safeDeleteMemfsFile, withFFmpegLock } from './clientMediaEngine';
+import { retrieveProjectVideoBlob } from './browserStorage';
 
 interface MemfsBlurOverride {
   mappedRect?: {
@@ -852,10 +853,24 @@ export async function renderProjectExportInBrowser(params: {
   const assetBytesMap = new Map<string, Uint8Array>();
   for (const u of urlsToLoad) {
     try {
+      if (u === project.sourceVideoUrl && (project.sourceVideoBlobKey || u.startsWith('blob:') || u.startsWith('idb://'))) {
+        const retrieved = await retrieveProjectVideoBlob(project);
+        if (retrieved?.blob && retrieved.blob.size > 0) {
+          assetBytesMap.set(u, new Uint8Array(await retrieved.blob.arrayBuffer()));
+          continue;
+        }
+      }
       const b = await resolveMediaBlob(u, resolveUrlFn);
       assetBytesMap.set(u, new Uint8Array(await b.arrayBuffer()));
     } catch (err) {
-      if (u === project.sourceVideoUrl) throw err;
+      if (u === project.sourceVideoUrl) {
+        const retrieved = await retrieveProjectVideoBlob(project).catch(() => null);
+        if (retrieved?.blob && retrieved.blob.size > 0) {
+          assetBytesMap.set(u, new Uint8Array(await retrieved.blob.arrayBuffer()));
+          continue;
+        }
+        throw err;
+      }
     }
   }
 
