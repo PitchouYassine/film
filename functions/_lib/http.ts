@@ -4,9 +4,9 @@ export function corsHeaders(request?: Request): HeadersInit {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD',
     'Access-Control-Allow-Headers':
-      'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range, X-Fish-Api-Key',
+      'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range, X-Fish-Api-Key, model',
     'Access-Control-Expose-Headers':
-      'Content-Length, Content-Range, Accept-Ranges, Content-Disposition',
+      'Content-Length, Content-Range, Accept-Ranges, Content-Disposition, X-Fish-Proxy, X-Fish-Upstream-Url, X-Fish-Response-Url',
     'Access-Control-Max-Age': '86400',
     ...(origin !== '*' ? { 'Access-Control-Allow-Credentials': 'true' } : {}),
   };

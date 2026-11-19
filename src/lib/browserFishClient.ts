@@ -23,12 +23,29 @@ import {
 function resolveProxyUrl(path: string): string {
   const base = (
     (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_BASE_URL) ||
-    (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_BACKEND_URL) ||
-    (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_APP_URL) ||
     ''
   ).replace(/\/+$/, '');
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
   return base ? `${base}${cleanPath}` : cleanPath;
+}
+
+const SAFE_DIAGNOSTIC_HEADERS = [
+  'server',
+  'x-vercel-id',
+  'cf-ray',
+  'x-fish-proxy',
+  'x-fish-upstream-url',
+  'x-fish-response-url',
+  'content-type',
+] as const;
+
+function collectSafeHeaders(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of SAFE_DIAGNOSTIC_HEADERS) {
+    const val = headers.get(name);
+    if (val) out[name] = val;
+  }
+  return out;
 }
 
 export async function ensureLocalProject(projectId: string): Promise<Project> {
@@ -107,6 +124,11 @@ async function measureAudioBlobDuration(blob: Blob, textFallback: string): Promi
     if (audioCtx && audioCtx.state !== 'closed') {
       await audioCtx.close().catch(() => {});
     }
+  }
+
+  if (typeof Audio === 'undefined' || typeof URL?.createObjectURL !== 'function') {
+    const words = textFallback.trim().split(/\s+/).filter(Boolean).length;
+    return Math.max(0.5, Number((words / 2.8).toFixed(2)));
   }
 
   return new Promise<number>((resolve) => {
@@ -227,12 +249,16 @@ export async function buildMergedDubBlobUrl(
   }
 }
 
-async function buildFishTts404Error(
-  resText: string,
-  parsed: Record<string, unknown> | null,
-  apiKey: string,
-  referenceId?: string
-): Promise<Error> {
+async function buildFishTts404Error(params: {
+  requestUrl: string;
+  responseUrl: string;
+  headers: Record<string, string>;
+  resText: string;
+  parsed: Record<string, unknown> | null;
+  apiKey: string;
+  referenceId?: string;
+}): Promise<Error> {
+  const { requestUrl, responseUrl, headers, resText, parsed, apiKey, referenceId } = params;
   const rawBody = sanitizeFishErrorText(
     (typeof parsed?.rawBody === 'string' && parsed.rawBody) ||
       (typeof parsed?.message === 'string' && parsed.message) ||
@@ -242,23 +268,55 @@ async function buildFishTts404Error(
   );
   const code = typeof parsed?.code === 'string' ? parsed.code : '';
   const errorCode = typeof parsed?.errorCode === 'string' ? parsed.errorCode : '';
+  const upstreamEndpoint =
+    (typeof parsed?.endpoint === 'string' && parsed.endpoint) ||
+    headers['x-fish-upstream-url'] ||
+    `${DEFAULT_FISH_API_BASE}/v1/tts`;
+  const upstreamResponseUrl =
+    (typeof parsed?.responseUrl === 'string' && parsed.responseUrl) ||
+    headers['x-fish-response-url'] ||
+    upstreamEndpoint;
   const lower = `${code} ${errorCode} ${rawBody}`.toLowerCase();
 
-  // 1. Endpoint / proxy route 404
+  const hasFishProxyHeader = Boolean(headers['x-fish-proxy']);
+  const reachedFishUpstream =
+    hasFishProxyHeader ||
+    (typeof parsed?.endpoint === 'string' && parsed.endpoint.includes('api.fish.audio'));
+
+  const isVercelEdge404 =
+    !reachedFishUpstream &&
+    (Boolean(headers['x-vercel-id']) ||
+      lower.includes('the page could not be found') ||
+      lower.includes('not_found') ||
+      /\b[a-z]{3}[0-9]::[a-z0-9-]+/i.test(rawBody));
+
+  if (isVercelEdge404) {
+    const vercelHint = headers['x-vercel-id'] || 'Vercel Edge';
+    return new Error(
+      `Fish Audio TTS failed (HTTP 404 · Vercel Edge / Proxy Route Not Found): Request to "${requestUrl}" (response URL: "${responseUrl}") returned a ${vercelHint} 404 and did NOT reach ${DEFAULT_FISH_API_BASE}/v1/tts. Deploy /api/fish/proxy/tts on Vercel or deploy the Cloudflare Pages Functions /functions directory. Response body: ${rawBody}`
+    );
+  }
+
   if (
+    !reachedFishUpstream ||
     code === 'ROUTE_NOT_FOUND' ||
-    errorCode === 'no_route' ||
-    lower.includes('no route serves this path') ||
     lower.includes('is not available in cloudflare edge runtime') ||
     lower.includes('<!doctype html') ||
     lower.includes('<html')
   ) {
     return new Error(
-      `Fish Audio TTS failed (HTTP 404 · Incorrect TTS endpoint): The TTS endpoint route was not found. Expected POST https://api.fish.audio/v1/tts via /api/fish/proxy/tts. Response body: ${rawBody}`
+      `Fish Audio TTS failed (HTTP 404 · Proxy / Hosting Route Not Found): Request to "${requestUrl}" (response URL: "${responseUrl}") did NOT reach ${DEFAULT_FISH_API_BASE}/v1/tts. Verify that /api/fish/proxy/tts is served by your hosting runtime. Response body: ${rawBody}`
     );
   }
 
-  // 2. Distinguish invalid/inaccessible reference_id vs invalid model resource
+  // Request reached Fish Audio upstream (https://api.fish.audio/v1/tts)
+  if (errorCode === 'no_route' || lower.includes('no route serves this path')) {
+    return new Error(
+      `Fish Audio TTS failed (HTTP 404 · Incorrect TTS endpoint): Upstream ${upstreamEndpoint} (response URL: ${upstreamResponseUrl}) returned no_route. Response body: ${rawBody}`
+    );
+  }
+
+  // Distinguish invalid/inaccessible reference_id vs Fish Audio resource 404
   if (referenceId) {
     try {
       const modelCheck = await fetch(
@@ -289,14 +347,13 @@ async function buildFishTts404Error(
       lower.includes('not found')
     ) {
       return new Error(
-        `Fish Audio TTS failed (HTTP 404 · Invalid or inaccessible reference_id "${referenceId}"): Response body: ${rawBody}`
+        `Fish Audio TTS failed (HTTP 404 · Invalid or inaccessible reference_id "${referenceId}"): Upstream ${upstreamEndpoint} returned 404. Response body: ${rawBody}`
       );
     }
   }
 
-  // 3. Invalid model resource / model header issue
   return new Error(
-    `Fish Audio TTS failed (HTTP 404 · Invalid model resource): Model "${DEFAULT_FISH_TTS_MODEL}" or requested resource was not found. Response body: ${rawBody}`
+    `Fish Audio TTS failed (HTTP 404 · Fish Audio resource not found): Upstream ${upstreamEndpoint} (response URL: ${upstreamResponseUrl}) with model "${DEFAULT_FISH_TTS_MODEL}" returned HTTP 404. Response body: ${rawBody}`
   );
 }
 
@@ -323,18 +380,56 @@ export async function synthesizeFishTtsViaProxy(
     body.reference_id = validReferenceId;
   }
 
-  const res = await fetch(resolveProxyUrl('/api/fish/proxy/tts'), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Fish-Api-Key': cleanKey,
-      model: DEFAULT_FISH_TTS_MODEL,
-    },
-    body: JSON.stringify(body),
+  const sameOriginPath = '/api/fish/proxy/tts';
+  const primaryRequestUrl = resolveProxyUrl(sameOriginPath);
+  const expectedUpstreamUrl = `${DEFAULT_FISH_API_BASE}/v1/tts`;
+
+  const doTtsFetch = (url: string) =>
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Fish-Api-Key': cleanKey,
+        model: DEFAULT_FISH_TTS_MODEL,
+      },
+      body: JSON.stringify(body),
+    });
+
+  console.info('[Fish TTS] Sending request', {
+    requestUrl: primaryRequestUrl,
+    upstreamEndpoint: expectedUpstreamUrl,
+    model: DEFAULT_FISH_TTS_MODEL,
+    hasReferenceId: Boolean(validReferenceId),
   });
+
+  let activeRequestUrl = primaryRequestUrl;
+  let res = await doTtsFetch(primaryRequestUrl);
+
+  // If VITE_API_BASE_URL redirected to another domain and that domain returned a host 404 (no X-Fish-Proxy),
+  // retry same-origin /api/fish/proxy/tts once.
+  if (res.status === 404 && primaryRequestUrl !== sameOriginPath && !res.headers.get('x-fish-proxy')) {
+    console.warn('[Fish TTS] Configured API base returned 404 without Fish proxy header; retrying same-origin proxy', {
+      failedUrl: primaryRequestUrl,
+      fallbackUrl: sameOriginPath,
+    });
+    activeRequestUrl = sameOriginPath;
+    res = await doTtsFetch(sameOriginPath);
+  }
+
+  const safeHeaders = collectSafeHeaders(res.headers);
+  const responseUrl = res.url || activeRequestUrl;
 
   if (!res.ok) {
     const resText = await res.text().catch(() => '');
+    const sanitizedBody = sanitizeFishErrorText(resText);
+    console.warn('[Fish TTS] Error response', {
+      requestUrl: activeRequestUrl,
+      responseUrl,
+      status: res.status,
+      headers: safeHeaders,
+      body: sanitizedBody,
+    });
+
     let parsed: Record<string, unknown> | null = null;
     if (resText) {
       try {
@@ -345,7 +440,15 @@ export async function synthesizeFishTtsViaProxy(
     }
 
     if (res.status === 404) {
-      throw await buildFishTts404Error(resText, parsed, cleanKey, validReferenceId);
+      throw await buildFishTts404Error({
+        requestUrl: activeRequestUrl,
+        responseUrl,
+        headers: safeHeaders,
+        resText,
+        parsed,
+        apiKey: cleanKey,
+        referenceId: validReferenceId,
+      });
     }
 
     if (res.status === 401 || res.status === 403) {
@@ -369,6 +472,13 @@ export async function synthesizeFishTtsViaProxy(
     );
     throw new Error(rawErr || `Fish Audio TTS request failed (HTTP ${res.status}).`);
   }
+
+  console.info('[Fish TTS] Response OK', {
+    requestUrl: activeRequestUrl,
+    responseUrl,
+    status: res.status,
+    headers: safeHeaders,
+  });
 
   const contentType = (res.headers.get('content-type') || 'audio/mpeg').toLowerCase();
   const audioBuffer = await res.arrayBuffer();

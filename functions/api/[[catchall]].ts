@@ -391,6 +391,9 @@ export const onRequest = async (context: {
       const fishBase = normalizeFishApiBaseUrl(env.FISH_API_BASE_URL);
       const ttsEndpoint = `${fishBase}/v1/tts`;
       const modelHeader = request.headers.get('model')?.trim() || DEFAULT_FISH_TTS_MODEL;
+      console.info(
+        `[Fish TTS Proxy:CF] POST ${ttsEndpoint} (model=${modelHeader}, hasReferenceId=${Boolean(validRefId)})`
+      );
       const upstream = await fetch(ttsEndpoint, {
         method: 'POST',
         headers: {
@@ -400,9 +403,18 @@ export const onRequest = async (context: {
         },
         body: JSON.stringify(upstreamPayload),
       });
+      const responseUrl = upstream.url || ttsEndpoint;
+      const proxyHeaders = {
+        'X-Fish-Proxy': 'cloudflare-pages',
+        'X-Fish-Upstream-Url': ttsEndpoint,
+        'X-Fish-Response-Url': responseUrl,
+      };
       if (!upstream.ok) {
         const errText = await upstream.text().catch(() => '');
         const cleanBody = sanitizeFishErrorText(errText);
+        console.warn(
+          `[Fish TTS Proxy:CF] Upstream HTTP ${upstream.status} from ${responseUrl}: ${cleanBody}`
+        );
         return jsonResponse(
           {
             error: cleanBody || `Fish Audio TTS error (${upstream.status})`,
@@ -411,9 +423,11 @@ export const onRequest = async (context: {
             errorCode: upstream.headers.get('x-fish-error-code') || undefined,
             errorSource: upstream.headers.get('x-fish-error-source') || undefined,
             endpoint: ttsEndpoint,
+            responseUrl,
           },
           upstream.status,
-          request
+          request,
+          proxyHeaders
         );
       }
       const audioBytes = await upstream.arrayBuffer();
@@ -421,6 +435,7 @@ export const onRequest = async (context: {
         status: 200,
         headers: {
           ...corsHeaders(request),
+          ...proxyHeaders,
           'Content-Type': upstream.headers.get('Content-Type') || 'audio/mpeg',
         },
       });

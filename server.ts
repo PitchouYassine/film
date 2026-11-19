@@ -155,11 +155,11 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD');
   res.header(
     'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range, X-Fish-Api-Key'
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range, X-Fish-Api-Key, model'
   );
   res.header(
     'Access-Control-Expose-Headers',
-    'Content-Length, Content-Range, Accept-Ranges, Content-Disposition'
+    'Content-Length, Content-Range, Accept-Ranges, Content-Disposition, X-Fish-Proxy, X-Fish-Upstream-Url, X-Fish-Response-Url'
   );
   res.header('Access-Control-Allow-Credentials', 'true');
 
@@ -438,6 +438,10 @@ app.post('/api/fish/proxy/tts', async (req, res) => {
       (typeof req.headers.model === 'string' ? req.headers.model.trim() : '') ||
       DEFAULT_FISH_TTS_MODEL;
 
+    console.info(
+      `[Fish TTS Proxy:Express] POST ${ttsEndpoint} (model=${modelHeader}, hasReferenceId=${Boolean(validRefId)})`
+    );
+
     const upstream = await fetch(ttsEndpoint, {
       method: 'POST',
       headers: {
@@ -448,11 +452,19 @@ app.post('/api/fish/proxy/tts', async (req, res) => {
       body: JSON.stringify(upstreamPayload),
     });
 
+    const responseUrl = upstream.url || ttsEndpoint;
+    res.setHeader('X-Fish-Proxy', 'express');
+    res.setHeader('X-Fish-Upstream-Url', ttsEndpoint);
+    res.setHeader('X-Fish-Response-Url', responseUrl);
+
     if (!upstream.ok) {
       const errText = await upstream.text().catch(() => '');
       const cleanBody = sanitizeFishErrorText(errText);
       const errorCode = upstream.headers.get('x-fish-error-code') || undefined;
       const errorSource = upstream.headers.get('x-fish-error-source') || undefined;
+      console.warn(
+        `[Fish TTS Proxy:Express] Upstream HTTP ${upstream.status} from ${responseUrl}: ${cleanBody}`
+      );
       res.status(upstream.status).json({
         error: cleanBody || `Fish Audio TTS error (${upstream.status})`,
         rawBody: cleanBody,
@@ -460,6 +472,7 @@ app.post('/api/fish/proxy/tts', async (req, res) => {
         errorCode,
         errorSource,
         endpoint: ttsEndpoint,
+        responseUrl,
       });
       return;
     }
