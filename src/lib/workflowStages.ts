@@ -920,7 +920,7 @@ export function resolveCanvasDimensions(
   return { width, height };
 }
 
-export type PipelineStepId = 'translator' | 'voice' | 'editor' | 'export';
+export type PipelineStepId = 'translator' | 'voice' | 'editor' | 'export' | 'styles';
 
 export interface EditorValidationResult {
   valid: boolean;
@@ -1119,6 +1119,15 @@ export function getPipelineSteps(
       completed: hasExport,
       active: activeStep === 'export',
       accessible: hasVideo,
+    },
+    {
+      id: 'styles',
+      number: '★',
+      label: 'My Saved Styles',
+      shortLabel: 'Styles',
+      completed: false,
+      active: activeStep === 'styles',
+      accessible: true,
     },
   ];
 }

@@ -8,6 +8,7 @@ import {
   Languages,
   LayoutDashboard,
   Mic,
+  Palette,
   Settings,
   ShieldCheck,
   X,
@@ -36,6 +37,7 @@ const STAGE_NAV_ITEMS: NavItemDef[] = [
   { id: 'voice', label: 'Voice Studio', stageBadge: '2', icon: Mic },
   { id: 'editor', label: 'Video Editor', stageBadge: '3', icon: Film },
   { id: 'export', label: 'Export', stageBadge: '4', icon: Download },
+  { id: 'styles', label: 'My Saved Styles', stageBadge: '★', icon: Palette },
   { id: 'dashboard', label: 'Projects & Import', stageBadge: '•', icon: LayoutDashboard },
 ];
 

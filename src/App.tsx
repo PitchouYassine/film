@@ -117,6 +117,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { TranslatorPage } from './pages/TranslatorPage';
 import { VoiceStudioPage } from './pages/VoiceStudioPage';
 import { ExportCenterPage } from './pages/ExportCenterPage';
+import { SavedStylesPage } from './pages/SavedStylesPage';
 import { SettingsPage, SettingsTabId } from './pages/SettingsPage';
 import { SaveStyleDialog } from './components/SaveStyleDialog';
 import { MyStylesManager } from './components/MyStylesManager';
@@ -222,10 +223,10 @@ export default function App() {
   const activeUndoGroupRef = useRef<{ key: string; timerId: number } | null>(null);
 
   // Top-level Shell Views & Modals (Restored from localStorage session cache)
-  const [activeView, setActiveView] = useState<'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'settings'>(() => {
+  const [activeView, setActiveView] = useState<'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'settings' | 'styles'>(() => {
     try {
       const lastView = window.localStorage.getItem('recap_studio_last_active_view');
-      return lastView === 'translator' || lastView === 'voice' || lastView === 'editor' || lastView === 'export'
+      return lastView === 'translator' || lastView === 'voice' || lastView === 'editor' || lastView === 'export' || lastView === 'styles' || lastView === 'settings'
         ? lastView
         : 'projects';
     } catch {
@@ -233,14 +234,14 @@ export default function App() {
     }
   });
 
-  const [settingsReturnView, setSettingsReturnView] = useState<'projects' | 'translator' | 'voice' | 'editor' | 'export'>('projects');
+  const [settingsReturnView, setSettingsReturnView] = useState<'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'styles'>('projects');
   const [focusTranslationOverflowSignal, setFocusTranslationOverflowSignal] = useState(0);
   const [cloudModalOpen, setCloudModalOpen] = useState(false);
   const [saveStyleModalOpen, setSaveStyleModalOpen] = useState(false);
   const [myStylesModalOpen, setMyStylesModalOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTabId>('api');
 
-  const updateActiveView = useCallback((view: 'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'settings') => {
+  const updateActiveView = useCallback((view: 'projects' | 'translator' | 'voice' | 'editor' | 'export' | 'settings' | 'styles') => {
     setActiveView(view);
     try {
       window.localStorage.setItem('recap_studio_last_active_view', view);
@@ -3331,6 +3332,8 @@ export default function App() {
       ? 'voice'
       : activeView === 'export'
       ? 'export'
+      : activeView === 'styles'
+      ? 'styles'
       : 'editor';
 
   const pipelineSteps = useMemo(
@@ -3345,12 +3348,12 @@ export default function App() {
       if (!activeProject) return;
       if (step === 'translator') {
         setActiveTool(null);
-        setActiveView('translator');
+        updateActiveView('translator');
         return;
       }
       if (step === 'voice') {
         setActiveTool(null);
-        setActiveView('voice');
+        updateActiveView('voice');
         return;
       }
       if (step === 'editor') {
@@ -3361,7 +3364,7 @@ export default function App() {
           Boolean(activeProject.workflow?.completedStages?.includes('voice'));
         if (!isValidated) {
           setActiveTool(null);
-          setActiveView(check.translationValid ? 'voice' : 'translator');
+          updateActiveView(check.translationValid ? 'voice' : 'translator');
           showNotice(
             check.errors[0] ||
               'Complete Translation & Voice Studio and click VALIDATE & CONTINUE TO VIDEO EDITOR first.'
@@ -3369,15 +3372,20 @@ export default function App() {
           return;
         }
         setActiveTool(null);
-        setActiveView('editor');
+        updateActiveView('editor');
         return;
       }
       if (step === 'export') {
         setActiveTool(null);
-        setActiveView('export');
+        updateActiveView('export');
+        return;
+      }
+      if (step === 'styles') {
+        setActiveTool(null);
+        updateActiveView('styles');
       }
     },
-    [activeProject, showNotice]
+    [activeProject, showNotice, updateActiveView]
   );
 
   return (
@@ -3700,6 +3708,16 @@ export default function App() {
               handleSelectProject(activeProject, page);
             }}
             onValidatedContinue={handleValidatedContinue}
+          />
+        </main>
+      ) : activeView === 'styles' ? (
+        <main className="flex-1 min-h-0 overflow-y-auto">
+          <SavedStylesPage
+            activeProject={activeProject}
+            onProjectUpdated={handleProjectUpdated}
+            onOpenSaveStyleDialog={() => setSaveStyleModalOpen(true)}
+            onNavigate={(page) => handleSelectProject(activeProject, page)}
+            onNotice={showNotice}
           />
         </main>
       ) : activeView === 'export' ? (
