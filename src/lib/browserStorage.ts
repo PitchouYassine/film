@@ -1,7 +1,7 @@
 import { Project, StudioPreset, DefaultStudioPreferences, SavedFishVoice, SavedFontAsset, RenderJob, FilmstripFrame } from '../types/studio';
 
 export const DB_NAME = 'recap_studio_local_db';
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 export const REQUIRED_STORES: Record<string, { keyPath: string }> = {
   projects: { keyPath: 'id' },
@@ -13,6 +13,7 @@ export const REQUIRED_STORES: Record<string, { keyPath: string }> = {
   saved_fish_voices: { keyPath: 'id' },
   fonts: { keyPath: 'id' },
   waveforms: { keyPath: 'id' },
+  appSettings: { keyPath: 'key' },
 };
 
 let cachedDb: IDBDatabase | null = null;

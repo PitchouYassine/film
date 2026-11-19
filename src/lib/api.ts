@@ -29,6 +29,21 @@ import type { FontCatalogItem } from './fontCatalog';
 import { handleLocalApiFallback } from './localApiFallback';
 import { processVideoUploadInBrowser } from './browserVideoProcessor';
 import { idbGet, idbSet } from './browserStorage';
+import {
+  getStoredFishApiKey,
+  getFishAudioSettingsSummary,
+  saveStoredFishApiKey,
+  testFishAudioConnection,
+  deleteStoredFishApiKey,
+  fetchFishVoicesFromBrowser,
+  validateFishVoiceInBrowser,
+} from './fishAudioKeyManager';
+import {
+  previewFishTtsViaProxy,
+  startBrowserFishDubJob,
+  regenerateFishSegmentsInBrowser,
+  transcribeWithFishViaProxy,
+} from './browserFishClient';
 
 export interface LocalAssetManifestItem {
   localUrl: string;
@@ -109,34 +124,24 @@ export interface PresetWarning {
 }
 
 export const api = {
-  getSystemStatus: () => request<SystemStatus>('/api/system/status'),
+  getSystemStatus: async () => {
+    const [res, localKey] = await Promise.all([
+      request<SystemStatus>('/api/system/status'),
+      getStoredFishApiKey(),
+    ]);
+    return {
+      ...res,
+      fishConfigured: Boolean(res.fishConfigured || localKey),
+    };
+  },
 
-  getFishAudioSettings: () =>
-    request<FishAudioSettingsSummary>('/api/settings/fish-audio'),
+  getFishAudioSettings: () => getFishAudioSettingsSummary(),
 
-  saveFishApiKey: (apiKey: string) =>
-    request<FishAudioSettingsSummary>('/api/settings/fish-api-key', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey }),
-    }),
+  saveFishApiKey: (apiKey: string) => saveStoredFishApiKey(apiKey),
 
-  testFishAudioConnection: (apiKey?: string) =>
-    request<{
-      ok: boolean;
-      connectionStatus: FishConnectionStatus;
-      message: string;
-      settings: FishAudioSettingsSummary;
-    }>('/api/settings/fish-api-key/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(apiKey && apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
-    }),
+  testFishAudioConnection: (apiKey?: string) => testFishAudioConnection(apiKey),
 
-  deleteFishApiKey: () =>
-    request<FishAudioSettingsSummary>('/api/settings/fish-api-key', {
-      method: 'DELETE',
-    }),
+  deleteFishApiKey: () => deleteStoredFishApiKey(),
 
   getDefaultPreferences: () =>
     request<{ preferences: DefaultStudioPreferences; defaultStyle: StudioPreset | null }>(
@@ -274,7 +279,11 @@ export const api = {
     );
   },
 
-  listFishVoices: (params?: { query?: string; selfOnly?: boolean; language?: string }) => {
+  listFishVoices: async (params?: { query?: string; selfOnly?: boolean; language?: string }) => {
+    const localKey = await getStoredFishApiKey();
+    if (localKey) {
+      return fetchFishVoicesFromBrowser(localKey, params);
+    }
     const qs = new URLSearchParams();
     if (params?.query) qs.set('q', params.query);
     if (params?.selfOnly) qs.set('self', 'true');
@@ -286,8 +295,12 @@ export const api = {
   listSavedFishVoices: () =>
     request<{ voices: SavedFishVoice[] }>('/api/fish/saved-voices'),
 
-  validateSavedFishVoice: (voiceId: string) =>
-    request<{
+  validateSavedFishVoice: async (voiceId: string) => {
+    const localKey = await getStoredFishApiKey();
+    if (localKey) {
+      return validateFishVoiceInBrowser(localKey, voiceId);
+    }
+    return request<{
       valid: boolean;
       checked: boolean;
       voiceId: string;
@@ -299,16 +312,28 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ voiceId }),
-    }),
+    });
+  },
 
-  previewSavedFishVoice: (params: { voiceId?: string; text?: string }) =>
-    request<{ audioUrl: string }>('/api/fish/saved-voices/preview', {
+  previewSavedFishVoice: async (params: { voiceId?: string; text?: string }) => {
+    const localKey = await getStoredFishApiKey();
+    if (localKey) {
+      const text =
+        String(params.text || '').trim() ||
+        'Everything changed the moment the vault door swung open in silence.';
+      return previewFishTtsViaProxy(localKey, {
+        text,
+        referenceId: params.voiceId,
+      });
+    }
+    return request<{ audioUrl: string }>('/api/fish/saved-voices/preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
-    }),
+    });
+  },
 
-  createSavedFishVoice: (params: {
+  createSavedFishVoice: async (params: {
     name: string;
     voiceId: string;
     description?: string;
@@ -317,15 +342,28 @@ export const api = {
     previewText?: string;
     isDefault?: boolean;
     skipRemoteValidation?: boolean;
-  }) =>
-    request<{ voice: SavedFishVoice; voices: SavedFishVoice[]; validationMessage?: string }>(
+  }) => {
+    const localKey = await getStoredFishApiKey();
+    let payload: Record<string, unknown> = { ...params };
+    let localValidationMsg: string | undefined;
+    if (localKey && !params.skipRemoteValidation) {
+      const check = await validateFishVoiceInBrowser(localKey, params.voiceId);
+      localValidationMsg = check.message;
+      payload = { ...params, skipRemoteValidation: true, validated: check.checked && check.valid };
+    }
+    const res = await request<{ voice: SavedFishVoice; voices: SavedFishVoice[]; validationMessage?: string }>(
       '/api/fish/saved-voices',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify(payload),
       }
-    ),
+    );
+    return {
+      ...res,
+      validationMessage: res.validationMessage || localValidationMsg,
+    };
+  },
 
   rebuildFishDubTrack: (
     projectId: string,
@@ -341,7 +379,7 @@ export const api = {
       body: JSON.stringify(params || {}),
     }),
 
-  updateSavedFishVoice: (
+  updateSavedFishVoice: async (
     id: string,
     params: {
       name?: string;
@@ -353,12 +391,19 @@ export const api = {
       isDefault?: boolean;
       skipRemoteValidation?: boolean;
     }
-  ) =>
-    request<{ voice: SavedFishVoice; voices: SavedFishVoice[] }>(`/api/fish/saved-voices/${id}`, {
+  ) => {
+    const localKey = await getStoredFishApiKey();
+    let payload: Record<string, unknown> = { ...params };
+    if (localKey && params.voiceId && !params.skipRemoteValidation) {
+      const check = await validateFishVoiceInBrowser(localKey, params.voiceId);
+      payload = { ...params, skipRemoteValidation: true, validated: check.checked && check.valid };
+    }
+    return request<{ voice: SavedFishVoice; voices: SavedFishVoice[] }>(`/api/fish/saved-voices/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    }),
+      body: JSON.stringify(payload),
+    });
+  },
 
   duplicateSavedFishVoice: (id: string) =>
     request<{ voice: SavedFishVoice; voices: SavedFishVoice[] }>(
@@ -625,15 +670,20 @@ export const api = {
       }
     ),
 
-  transcribeWithFish: (projectId: string, sourceLanguage?: string) =>
-    request<{ project: Project; detectedLanguage: string; segmentCount: number }>(
+  transcribeWithFish: async (projectId: string, sourceLanguage?: string) => {
+    const localKey = await getStoredFishApiKey();
+    if (localKey) {
+      return transcribeWithFishViaProxy(localKey, projectId, sourceLanguage);
+    }
+    return request<{ project: Project; detectedLanguage: string; segmentCount: number }>(
       `/api/projects/${projectId}/dubbing/transcribe`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sourceLanguage }),
       }
-    ),
+    );
+  },
 
   importCaptions: (projectId: string, content: string) =>
     request<{ project: Project; count: number }>(`/api/projects/${projectId}/captions/import`, {
@@ -653,28 +703,41 @@ export const api = {
       body: JSON.stringify({ targetLanguage, preserveProperNouns }),
     }),
 
-  previewFishDub: (
+  previewFishDub: async (
     projectId: string,
     params: { text: string; referenceId?: string; speakingSpeed: number }
-  ) =>
-    request<{ audioUrl: string }>(`/api/projects/${projectId}/dubbing/preview`, {
+  ) => {
+    const localKey = await getStoredFishApiKey();
+    if (localKey) {
+      return previewFishTtsViaProxy(localKey, {
+        text: params.text,
+        referenceId: params.referenceId,
+      });
+    }
+    return request<{ audioUrl: string }>(`/api/projects/${projectId}/dubbing/preview`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
-    }),
+    });
+  },
 
-  generateFishDub: (
+  generateFishDub: async (
     projectId: string,
     params: { voice: Project['voice']; captions?: CaptionSegment[]; useTranslated?: boolean }
-  ) =>
-    request<{ job: RenderJob }>(
+  ) => {
+    const localKey = await getStoredFishApiKey();
+    if (localKey) {
+      return startBrowserFishDubJob(localKey, projectId, params);
+    }
+    return request<{ job: RenderJob }>(
       `/api/projects/${projectId}/dubbing/generate`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
       }
-    ),
+    );
+  },
 
   resyncFishDub: (projectId: string, syncMode: SyncMode, continuousPauseMs?: number) =>
     request<{ project: Project }>(`/api/projects/${projectId}/dubbing/resync`, {
@@ -683,7 +746,7 @@ export const api = {
       body: JSON.stringify({ syncMode, continuousPauseMs }),
     }),
 
-  regenerateFishSegments: (
+  regenerateFishSegments: async (
     projectId: string,
     params: {
       segmentIds: string[];
@@ -691,8 +754,12 @@ export const api = {
       voice?: Partial<Project['voice']>;
       useTranslated?: boolean;
     }
-  ) =>
-    request<{
+  ) => {
+    const localKey = await getStoredFishApiKey();
+    if (localKey) {
+      return regenerateFishSegmentsInBrowser(localKey, projectId, params);
+    }
+    return request<{
       project: Project;
       regeneratedIds: string[];
       fullDubUrl: string;
@@ -700,7 +767,8 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
-    }),
+    });
+  },
 
   previewVoice: (
     projectId: string,
@@ -766,7 +834,11 @@ export const api = {
   listProjectJobs: (projectId: string) =>
     request<{ jobs: RenderJob[] }>(`/api/projects/${projectId}/jobs`),
 
-  getJob: (jobId: string) => request<{ job: RenderJob }>(`/api/jobs/${jobId}`),
+  getJob: async (jobId: string) => {
+    const localJob = await idbGet<RenderJob>('jobs', jobId).catch(() => undefined);
+    if (localJob) return { job: localJob };
+    return request<{ job: RenderJob }>(`/api/jobs/${jobId}`);
+  },
 
   listAllJobs: () => request<{ jobs: RenderJob[] }>('/api/jobs'),
 

@@ -4,7 +4,7 @@ export function corsHeaders(request?: Request): HeadersInit {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD',
     'Access-Control-Allow-Headers':
-      'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range',
+      'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range, X-Fish-Api-Key',
     'Access-Control-Expose-Headers':
       'Content-Length, Content-Range, Accept-Ranges, Content-Disposition',
     'Access-Control-Max-Age': '86400',

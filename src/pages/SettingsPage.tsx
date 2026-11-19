@@ -34,6 +34,7 @@ import {
   SyncMode,
 } from '../types/studio';
 import { api } from '../lib/api';
+import { getStoredFishApiKey } from '../lib/fishAudioKeyManager';
 import { formatBytes } from '../lib/formatters';
 import { MyVoicesManager } from '../components/MyVoicesManager';
 import { MyStylesManager } from '../components/MyStylesManager';
@@ -88,6 +89,7 @@ export function SettingsPage({
   // Fish Audio API key state
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [showKeyInput, setShowKeyInput] = useState(false);
+  const [revealedSavedKey, setRevealedSavedKey] = useState<string | null>(null);
   const [editingKey, setEditingKey] = useState(false);
   const [savingKey, setSavingKey] = useState(false);
   const [testingConn, setTestingConn] = useState(false);
@@ -129,7 +131,34 @@ export function SettingsPage({
 
   useEffect(() => {
     void refreshSettingsData();
+    return () => {
+      setRevealedSavedKey(null);
+    };
   }, [refreshSettingsData]);
+
+  const handleToggleRevealSavedKey = async () => {
+    if (revealedSavedKey !== null) {
+      setRevealedSavedKey(null);
+      return;
+    }
+    const stored = await getStoredFishApiKey();
+    if (stored) {
+      setRevealedSavedKey(stored);
+    }
+  };
+
+  const handleToggleEditKey = async () => {
+    if (editingKey) {
+      setEditingKey(false);
+      setApiKeyInput('');
+      setShowKeyInput(false);
+      return;
+    }
+    const stored = await getStoredFishApiKey();
+    setApiKeyInput(stored || '');
+    setShowKeyInput(false);
+    setEditingKey(true);
+  };
 
   const handleSaveApiKey = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -146,10 +175,11 @@ export function SettingsPage({
       setFishSettings(updated);
       setApiKeyInput('');
       setShowKeyInput(false);
+      setRevealedSavedKey(null);
       setEditingKey(false);
       setFishNotice({
         kind: 'success',
-        text: 'Fish Audio API key encrypted and saved securely. Click Test Connection to verify access.',
+        text: 'Fish Audio API key saved locally in browser storage (IndexedDB). Click Test Connection to verify access.',
       });
       await api.getSystemStatus().then(setStatus).catch(() => {});
       onSettingsUpdated?.();
@@ -193,12 +223,13 @@ export function SettingsPage({
       setFishSettings(updated);
       setApiKeyInput('');
       setShowKeyInput(false);
+      setRevealedSavedKey(null);
       setEditingKey(!updated.configured);
       setFishNotice({
         kind: 'success',
         text: updated.configured
-          ? 'Removed saved key; using server environment fallback.'
-          : 'Removed Fish Audio API key from secure backend storage.',
+          ? 'Removed saved local key; using fallback key.'
+          : 'Removed Fish Audio API key from local browser storage.',
       });
       await api.getSystemStatus().then(setStatus).catch(() => {});
       onSettingsUpdated?.();
@@ -316,7 +347,7 @@ export function SettingsPage({
                 className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200 space-y-1"
               >
                 <div className="font-semibold text-amber-100">
-                  Backend Encrypted Secret Storage Unavailable
+                  Local Browser Storage Unavailable
                 </div>
                 <p className="leading-relaxed">{fishSettings.secureStorageDetail}</p>
               </div>
@@ -324,35 +355,51 @@ export function SettingsPage({
 
             {fishSettings?.configured && (
               <div className="p-3 rounded-lg bg-[#18181D] border border-white/[0.08] flex flex-wrap items-center justify-between gap-3">
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                   <div className="text-[11px] text-zinc-400 flex items-center gap-1.5">
                     <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                     <span>
-                      {fishSettings.source === 'encrypted_store'
+                      {fishSettings.source === 'local_storage'
+                        ? 'Saved locally on this device (Browser IndexedDB · unencrypted)'
+                        : fishSettings.source === 'encrypted_store'
                         ? 'Saved in encrypted backend store'
                         : 'Loaded from server environment (FISH_API_KEY)'}
                     </span>
                   </div>
-                  <div className="text-xs font-mono text-zinc-100 mt-1 tracking-wider">
-                    {fishSettings.maskedKey}
+                  <div className="flex items-center gap-2 mt-1">
+                    <div className="text-xs font-mono text-zinc-100 tracking-wider break-all">
+                      {revealedSavedKey !== null ? revealedSavedKey : fishSettings.maskedKey}
+                    </div>
+                    {fishSettings.source === 'local_storage' && (
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleRevealSavedKey()}
+                        aria-label={revealedSavedKey !== null ? 'Hide Saved API Key' : 'Show Saved API Key'}
+                        title={revealedSavedKey !== null ? 'Hide API Key' : 'Show API Key'}
+                        className="p-1 rounded text-zinc-400 hover:text-white hover:bg-white/[0.06] cursor-pointer shrink-0"
+                      >
+                        {revealedSavedKey !== null ? (
+                          <EyeOff className="w-3.5 h-3.5" />
+                        ) : (
+                          <Eye className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0">
                   <button
                     type="button"
-                    onClick={() => {
-                      setEditingKey((prev) => !prev);
-                      setApiKeyInput('');
-                      setShowKeyInput(false);
-                    }}
+                    onClick={() => void handleToggleEditKey()}
                     className="min-h-[36px] px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-white/[0.08] text-xs font-medium text-zinc-200 flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
-                    <span>{editingKey ? 'Cancel Replace' : 'Replace API Key'}</span>
+                    <span>{editingKey ? 'Cancel Edit' : 'Edit API Key'}</span>
                   </button>
 
-                  {fishSettings.source === 'encrypted_store' && (
+                  {(fishSettings.source === 'local_storage' ||
+                    fishSettings.source === 'encrypted_store') && (
                     <button
                       type="button"
                       onClick={() => void handleRemoveSavedKey()}
@@ -378,7 +425,7 @@ export function SettingsPage({
                     htmlFor="fish-api-key-input"
                     className="block text-xs font-medium text-zinc-300 mb-1.5"
                   >
-                    {fishSettings?.configured ? 'New Fish Audio API Key' : 'Fish Audio API Key'}
+                    {fishSettings?.configured ? 'Edit Fish Audio API Key' : 'Fish Audio API Key'}
                   </label>
                   <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
                     <div className="relative flex-1 min-w-[200px]">
@@ -421,14 +468,17 @@ export function SettingsPage({
               </form>
             )}
 
-            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-              <div className="text-[11px] text-zinc-400 flex items-center gap-1.5">
-                <ShieldCheck className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                <span>
-                  Encrypted server-side ({fishSettings?.secureStorageMode === 'env_master_key' ? 'SECRETS_ENCRYPTION_KEY' : 'AES-256-GCM'}). Never stored in browser storage, presets, or exports.
-                </span>
+            <div className="p-3 rounded-lg bg-zinc-900/70 border border-white/[0.06] text-[11px] text-zinc-400 space-y-1">
+              <div className="flex items-center gap-1.5 font-medium text-zinc-300">
+                <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>Local Device Storage Notice</span>
               </div>
+              <p className="leading-relaxed">
+                Your Fish Audio API key is stored locally on this device in browser IndexedDB (unencrypted). Local IndexedDB storage is not equivalent to encrypted server-side secret storage—anyone with access to this browser profile or scripts running on this site could read it. Your key is never stored in any backend database, analytics service, presets, or exports.
+              </p>
+            </div>
 
+            <div className="flex flex-wrap items-center justify-end gap-3 pt-1">
               <button
                 type="button"
                 onClick={() => void handleTestConnection()}

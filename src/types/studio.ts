@@ -1296,10 +1296,10 @@ export type FishConnectionStatus = 'connected' | 'not_connected' | 'error';
 
 export interface FishAudioSettingsSummary {
   configured: boolean;
-  source: 'encrypted_store' | 'env' | 'none';
+  source: 'encrypted_store' | 'env' | 'none' | 'local_storage';
   maskedKey: string | null;
   secureStorageAvailable: boolean;
-  secureStorageMode: 'env_master_key' | 'server_key_file' | 'unavailable';
+  secureStorageMode: 'env_master_key' | 'server_key_file' | 'unavailable' | 'local_indexeddb';
   secureStorageDetail: string;
   connectionStatus: FishConnectionStatus;
   lastCheckedAt: string | null;

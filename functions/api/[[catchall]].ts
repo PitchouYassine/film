@@ -343,6 +343,74 @@ export const onRequest = async (context: {
       return jsonResponse(await listFishVoices(env, { query, selfOnly, language }), 200, request);
     }
 
+    if (method === 'POST' && pathname === '/api/fish/proxy/tts') {
+      const headerKey = request.headers.get('X-Fish-Api-Key')?.trim();
+      const apiKey = headerKey || (await resolveFishApiKey(env)).apiKey;
+      if (!apiKey) {
+        return errorJson('Fish Audio API key is required.', 401, request);
+      }
+      const rawBody = await request.text();
+      const fishBase = (env.FISH_API_BASE_URL || 'https://api.fish.audio').replace(/\/+$/, '');
+      const upstream = await fetch(`${fishBase}/v1/tts`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          model: request.headers.get('model') || 's2.1-pro-free',
+        },
+        body: rawBody,
+      });
+      if (!upstream.ok) {
+        const errText = await upstream.text().catch(() => '');
+        return errorJson(
+          errText.slice(0, 220) || `Fish Audio TTS error (${upstream.status})`,
+          upstream.status,
+          request
+        );
+      }
+      const audioBytes = await upstream.arrayBuffer();
+      return new Response(audioBytes, {
+        status: 200,
+        headers: {
+          ...corsHeaders(request),
+          'Content-Type': upstream.headers.get('Content-Type') || 'audio/mpeg',
+        },
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/fish/proxy/asr') {
+      const headerKey = request.headers.get('X-Fish-Api-Key')?.trim();
+      const apiKey = headerKey || (await resolveFishApiKey(env)).apiKey;
+      if (!apiKey) {
+        return errorJson('Fish Audio API key is required.', 401, request);
+      }
+      const formData = await request.formData();
+      const fishBase = (env.FISH_API_BASE_URL || 'https://api.fish.audio').replace(/\/+$/, '');
+      const upstream = await fetch(`${fishBase}/v1/asr`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          model: 'transcribe-1-pro',
+        },
+        body: formData,
+      });
+      const rawText = await upstream.text();
+      if (!upstream.ok) {
+        return errorJson(
+          rawText.slice(0, 220) || `Fish Audio ASR error (${upstream.status})`,
+          upstream.status,
+          request
+        );
+      }
+      return new Response(rawText, {
+        status: 200,
+        headers: {
+          ...corsHeaders(request),
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+      });
+    }
+
     // Saved Voices CRUD
     if (method === 'GET' && pathname === '/api/fish/saved-voices') {
       const db = requireDb(env);
@@ -380,8 +448,10 @@ export const onRequest = async (context: {
       if (!name) return errorJson('Narrator name is required.', 400, request);
       if (!voiceId) return errorJson('Fish Audio Voice ID is required.', 400, request);
 
-      let validated = false;
-      let validationMessage = 'Saved without remote verification.';
+      let validated = Boolean(body.validated);
+      let validationMessage = validated
+        ? 'Verified Fish Audio Voice ID.'
+        : 'Saved without remote verification.';
       if (!body.skipRemoteValidation) {
         const check = await validateFishVoiceId(env, voiceId);
         validated = check.checked && check.valid;
@@ -454,7 +524,8 @@ export const onRequest = async (context: {
       if (!name || !voiceId) {
         return errorJson('Both narrator name and Fish Audio Voice ID are required.', 400, request);
       }
-      let validated = found.validated;
+      let validated =
+        body.validated !== undefined ? Boolean(body.validated) : found.validated;
       if (voiceId !== found.voiceId && !body.skipRemoteValidation) {
         const check = await validateFishVoiceId(env, voiceId);
         validated = check.checked && check.valid;
